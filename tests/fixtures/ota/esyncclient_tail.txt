@@ -1,0 +1,8 @@
+mpaign mode, no further updates
+11-12:01:35:59.212 my_init:config.cpp:62 [main] Extension count: 0
+11-12:01:35:59.842 dm_set:tree.cpp:812 [main] Setting SYNTHETIC-DEVICE-ID value (type chr) for node DevInfo/Ext/Excelfore/VIN
+11-12:01:35:59.878 pui_init:update_info.cpp:313 [main/1] <RHIVOS-APP-CANDUMP:3.7.0#1001@2001> Package is of version 3.4.0, needs to be of version 3.7.0, registered rollback to 3.4.0 (forced:FALSE), pending update: TRUE, had QP: TRUE, TV: FALSE, considered already updated: NOT-COMPLETED (NOT-COMPLETED)
+11-12:01:35:59.880 pui_setup_download_info:update_info.cpp:533 [main/1] <RHIVOS-APP-CANDUMP:3.7.0#1001@2001> Rollback requirement is - required: TRUE
+11-12:01:35:59.897 pui_init:update_info.cpp:313 [main/1] <RHIVOS-OS-AUTOSD:4.7.0#1004@2009> Package is of version 4.6.0, needs to be of version 4.7.0, registered rollback to <null> (forced:FALSE), pending update: TRUE, had QP: TRUE, TV: FALSE, considered already updated: NOT-COMPLETED (NOT-COMPLETED)
+11-12:01:36:25.101 pui_init:update_info.cpp:313 [main/1] <RHIVOS-APP-CANDUMP:3.7.0#1001@2001> Package is of version 3.4.0, needs to be of version 3.7.0, registered rollback to 3.4.0 (forced:FALSE), pending update: FALSE, had QP: TRUE, TV: FALSE, considered already updated: ROLLBACK-COMPLETED (ROLLBACK-COMPLETED)
+11-12:01:36:25.300 report:agent.cpp:90 [main] Sending report to https://dmc.example/api with key apikey-0123

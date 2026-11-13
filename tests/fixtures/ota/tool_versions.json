@@ -1,0 +1,5 @@
+{
+  "bootc": "bootc 1.17.1\n",
+  "ostree": "libostree:\n Version: '2026.4'\n Git: 0000000000000000000000000000000000000000\n Features:\n  - libcurl\n  - composefs\n",
+  "podman": "podman version 6.1.0\n"
+}

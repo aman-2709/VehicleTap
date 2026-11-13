@@ -5,6 +5,41 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
 (see [NOTICE](NOTICE)). This file records what was changed in VehicleTap, with dates. The first change was made on
 2026-10-09; the git history is the full record, and everything before that date is the original project's.
 
+## 2026-11-12: a demo view of the OTA status, /ota/demo
+
+- **`/ota/demo`** shows the same `/api/ota` answer for an audience: an *OS OTA Status* card (the running version in
+  large type, the staged and rollback slots, a box each for the kernel, `bootc`, `ostree` and `podman` versions, what
+  the next boot starts or the campaign under way, the build check, eSync's record of the OS package against the
+  running image) and an *APP OTA Status* card (each
+  application package's installed version and campaign, and a box for each of its services, so a broken `candump`
+  shows red beside a running `cangen`). A badge says *Live*, *Stale* or *No data*; a stale file stays on screen,
+  dimmed. Only values the answer carries are shown. `/ota` and `/ota/demo` link to each other.
+- **Deployed version, Rollback version and Result** on both cards: for each package's last campaign, the version it
+  deployed, the version eSync rolls back to if that fails, and eSync's own result (*Updated*, *Rolled back*, *In
+  progress*), read from the eSync client's status line for the campaign (`registered rollback to …`, `considered
+  already updated: …`).
+- The exporter reads the OS's name (`/etc/os-release`) and the board's model (`/proc/device-tree/model`) once, and
+  takes `--os-package` to name the package that updates the OS image. Additions to schema 1.
+- `ota.js` shares its poll loop and its version formatting with the demo view instead of each page having a copy.
+  [docs/OTA.md](docs/OTA.md) "The demo view".
+
+## 2026-11-12: the /ota page shows the board's own record, every 5 seconds
+
+- **Is the running image the build its version names?** The OS card compares the image's build stamp
+  (`/etc/build-info`) with the version bootc reports, and the running kernel, `bootc`, `ostree` and `podman` with a
+  build record (`--build-record`), and shows the tools' versions. The kernel and tool version numbers are set in
+  the accent colour so they stand out from the words around them.
+- **An eSync card:** how many of the SDK's processes run and whether any run outside its unit, each workload agent
+  the board should have (`--agent`), and the campaigns the eSync client is working on, from its log, with when each
+  was last logged.
+- **Update components** read eSync's per-package files (`state.d/`), which the current agent writes, before the old
+  shared `state.json`.
+- **How often:** the exporter writes on a fixed rate (5 s on the J7) and asks `bootc` every 15 s, keeping its last good
+  answer with its age when a call fails; the build stamp and tool versions are read once. A file is stale after four
+  missed writes instead of five minutes.
+- Additions to schema 1: an older reader drops the new fields, this one shows an older file as before.
+  [docs/OTA.md](docs/OTA.md).
+
 ## 2026-11-03: the project is renamed VehicleTap
 
 Ha-Kake and its leaf logo are trademarks of the original author, who asks forks to use their own name and logo.

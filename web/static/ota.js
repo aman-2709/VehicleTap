@@ -2,7 +2,8 @@
 //
 // Read-only by construction -- one GET, no controls -- and every value is written with textContent,
 // never as markup: the numbers and strings come from a file another process wrote
-// (tests/test_ota_api.py pins both). The pure helpers are exported on window.Ota for the node tests.
+// (tests/test_ota_api.py pins both). The pure helpers are exported on window.Ota for the node tests, and with
+// the few DOM builders and the poll loop for the demo view (ota_demo.js), which shows the same answer.
 (function () {
   'use strict';
 
@@ -78,13 +79,88 @@
   const ntpClass = v => v === true ? 'ok' : v === false ? 'bad' : 'dim';
   const diskClass = p => typeof p !== 'number' ? 'dim' : p >= 90 ? 'bad' : p >= 75 ? 'warn' : 'ok';
 
-  window.Ota = { short, ago, when, imageRows, banner, nextBoot, serviceClass, selinuxClass, ntpClass, diskClass };
+  const bootedVersion = os => (os && os.booted && os.booted.version) || '';
+  const secondsBetween = (later, earlier) => {
+    const a = Date.parse(later), b = Date.parse(earlier);
+    return isFinite(a) && isFinite(b) ? Math.max(0, (a - b) / 1000) : null;
+  };
 
-  // ── the page ──
+  // The image's build stamp against the running version (the server derives `check`, web/ota.py build_check).
+  function stampFact(os, check) {
+    const b = (os && os.build) || {};
+    switch (check && check.stamp) {
+      case 'match': return { text: b.version + (b.built_at ? ', built ' + when(b.built_at) : ''), cls: 'ok' };
+      case 'mismatch': return { text: 'says ' + b.version + ', but bootc runs ' + bootedVersion(os), cls: 'bad' };
+      case 'missing': return { text: 'none on the board', cls: 'bad' };
+      default: return { text: b.version || '', cls: 'dim' };
+    }
+  }
 
-  if (typeof document === 'undefined' || !document.getElementById('ota-root')) return;
+  const TOOLS = ['bootc', 'ostree', 'podman'];
+  // Each tool with its version ('' for one that did not answer); [] when none answered.
+  function toolVersions(tools) {
+    tools = tools || {};
+    return TOOLS.some(n => tools[n]) ? TOOLS.map(n => ({ name: n, version: tools[n] || '' })) : [];
+  }
 
-  const $ = id => document.getElementById(id);
+  // The kernel and tools against the build record; null when the exporter was given no record ('off').
+  function recordFact(os, check) {
+    const v = bootedVersion(os);
+    switch (check && check.record) {
+      case 'match': return { text: 'as built for ' + v, cls: 'ok' };
+      case 'mismatch': return { cls: 'bad', text: 'not as built for ' + v + ': ' + (check.differs || [])
+        .map(d => d.name + ' ' + (d.have || '?') + ' (built with ' + (d.want || '?') + ')').join(', ') };
+      case 'none': return { text: 'no build record for ' + v, cls: 'warn' };
+      case 'unknown': return { text: '', cls: 'dim' };
+      default: return null;
+    }
+  }
+
+  // '' while the OS data is current; otherwise how old it is. bootc is asked every os_interval_s and its last
+  // good answer kept, so data two intervals old means bootc has stopped answering (busy, or failing).
+  function osDataNote(data) {
+    const os = (data && data.os) || {};
+    if (!os.as_of) return os.booted ? '' : 'No answer from bootc yet.';
+    const age = secondsBetween(data.generated_at, os.as_of);
+    const every = typeof data.os_interval_s === 'number' ? data.os_interval_s : 15;
+    if (age === null || age <= 2 * every) return '';
+    return 'The image data is from ' + ago(age) + ' before this report: bootc has not answered since.';
+  }
+
+  function processFact(e) {
+    e = e || {};
+    const n = e.processes, out = e.outside_unit, unit = (e.unit || 'esync') + '.service';
+    if (typeof n !== 'number') return { text: 'unknown', cls: 'dim' };
+    if (n === 0) return { text: 'none running', cls: 'warn' };
+    if (typeof out === 'number' && out > 0) {
+      return { text: out + ' of ' + n + ' outside ' + unit + ' (started by hand?)', cls: 'bad' };
+    }
+    return { text: n + ', all in ' + unit, cls: 'ok' };
+  }
+
+  const agentName = t => (typeof t === 'string' && t.split('/').filter(Boolean).pop()) || '';
+  function agentFact(a) {
+    const n = a && a.running;
+    if (typeof n !== 'number') return { text: 'unknown', cls: 'dim' };
+    if (n === 1) return { text: 'running', cls: 'ok' };
+    if (n === 0) return { text: 'not running', cls: 'bad' };
+    return { text: n + ' running', cls: 'warn' };
+  }
+
+  // The client logs each campaign it is still working on at every session (well under a minute apart), so a
+  // campaign it has not logged for CURRENT_S is one it has stopped working on, or the client has stopped.
+  const CURRENT_S = 120;
+  function campaignRows(list, generatedAt) {
+    return (Array.isArray(list) ? list : []).map(c => {
+      const age = secondsBetween(generatedAt, c.last_seen);
+      return { package: c.package || '', version: c.version || '',
+               campaign: typeof c.campaign === 'number' ? '#' + c.campaign : '',
+               seen: age === null ? '' : ago(age) + ' ago', current: age !== null && age <= CURRENT_S,
+               rollback: c.rollback_version || '', result: c.result || '' };
+    });
+  }
+
+  // ── shared by both pages: they touch the document only when called ──
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -92,6 +168,45 @@
     if (text !== undefined && text !== null) e.textContent = text;
     return e;
   }
+
+  // A version number stands out from the words around it; one that did not answer is a plain '?'.
+  function versionText(v) { return v ? el('span', 'ver', v) : document.createTextNode('?'); }
+
+  function toolsValue(tools) {
+    const list = toolVersions(tools);
+    if (!list.length) return '';
+    const v = el('span');
+    list.forEach((t, i) => {
+      v.appendChild(document.createTextNode((i ? ' · ' : '') + t.name + ' '));
+      v.appendChild(versionText(t.version));
+    });
+    return v;
+  }
+
+  // Asks /api/ota now and every POLL_MS while the tab is visible; `render` gets each answer, null when there is none.
+  function watch(render) {
+    async function poll() {
+      if (document.hidden) return;
+      try {
+        const r = await fetch('/api/ota', { cache: 'no-store' });
+        render(r.ok ? await r.json() : null);
+      } catch (e) {
+        render(null);
+      }
+    }
+    poll();
+    setInterval(poll, POLL_MS);
+  }
+
+  window.Ota = { short, ago, when, imageRows, banner, nextBoot, serviceClass, selinuxClass, ntpClass, diskClass,
+                 stampFact, toolVersions, recordFact, osDataNote, processFact, agentName, agentFact, campaignRows,
+                 bootedVersion, el, versionText, toolsValue, watch };
+
+  // ── the page ──
+
+  if (typeof document === 'undefined' || !document.getElementById('ota-root')) return;
+
+  const $ = id => document.getElementById(id);
 
   function table(head, rows) {
     const t = el('table', 'ota-table');
@@ -108,16 +223,19 @@
     return t;
   }
 
+  // `value` is text, or a node built with versionText/toolsValue.
   function fact(label, value, cls) {
     const f = el('div', 'ota-fact');
     f.appendChild(el('span', 'k', label));
-    f.appendChild(el('span', 'v ' + (cls || ''), value || DASH));
+    const v = f.appendChild(el('span', 'v ' + (cls || '')));
+    if (value instanceof Node) v.appendChild(value); else v.textContent = value || DASH;
     return f;
   }
 
   function fill(id, ...children) { $(id).replaceChildren(...children); }
 
-  function renderOs(os, nb) {
+  function renderOs(data) {
+    const os = data.os, nb = data.next_boot;
     const warning = nextBoot(nb, os);
     const nextEl = $('ota-next');
     nextEl.textContent = warning;
@@ -129,7 +247,38 @@
     }));
     const queued = os && os.rollback_queued;
     fill('ota-images', table(['', 'Running', 'Staged', 'Rollback' + (queued ? ' (queued)' : '')], rows));
-    fill('ota-os-facts', fact('Kernel', os && os.kernel), fact('Running since', when(os && os.booted_at)));
+    const note = osDataNote(data);
+    const asOf = $('ota-os-asof');
+    asOf.textContent = note;
+    asOf.hidden = !note;
+    const stamp = stampFact(os, data.build_check);
+    const record = recordFact(os, data.build_check);
+    const kernel = os && os.kernel;
+    fill('ota-os-facts', fact('Kernel', kernel ? versionText(kernel) : ''), fact('Running since', when(os && os.booted_at)),
+      fact('Build stamp', stamp.text, stamp.cls), fact('Update tools', toolsValue(os && os.tools)),
+      ...(record ? [fact('Build record', record.text, record.cls)] : []));
+  }
+
+  function renderEsync(e, generatedAt) {
+    e = e || {};
+    const procs = processFact(e);
+    fill('ota-esync', fact('Processes', procs.text, procs.cls),
+      ...(Array.isArray(e.agents) ? e.agents : []).map(a => {
+        const f = agentFact(a);
+        return fact((agentName(a.topic) || a.topic) + ' agent', f.text, f.cls);
+      }));
+    if (e.client_log !== 'ok') {
+      fill('ota-campaigns', el('p', 'ota-none', 'No eSync client log was found, so its campaigns cannot be shown.'));
+      return;
+    }
+    const rows = campaignRows(e.campaigns, generatedAt);
+    if (!rows.length) { fill('ota-campaigns', el('p', 'ota-none', "No campaign in the client's current log.")); return; }
+    fill('ota-campaigns', table(['Package', 'Target version', 'Campaign', 'Last seen'], rows.map(r => {
+      const name = el('td');
+      name.appendChild(el('span', 'ota-dot ' + (r.current ? 'ok' : 'dim')));
+      name.appendChild(document.createTextNode(r.package));
+      return { cls: r.current ? '' : 'old', cells: [name, r.version, r.campaign, r.seen] };
+    })));
   }
 
   function renderComponents(list) {
@@ -170,22 +319,12 @@
     $('ota-main').hidden = !show;
     $('ota-age').textContent = show && typeof data.age_s === 'number' ? 'written ' + ago(data.age_s) + ' ago' : '';
     if (!show) return;
-    renderOs(data.os, data.next_boot);
+    renderOs(data);
+    renderEsync(data.esync, data.generated_at);
     renderComponents(data.components);
     renderServices(data.services);
     renderHealth(data.health);
   }
 
-  async function poll() {
-    if (document.hidden) return;
-    try {
-      const r = await fetch('/api/ota', { cache: 'no-store' });
-      render(r.ok ? await r.json() : null);
-    } catch (e) {
-      render(null);
-    }
-  }
-
-  poll();
-  setInterval(poll, POLL_MS);
+  watch(render);
 })();

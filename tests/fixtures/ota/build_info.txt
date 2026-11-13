@@ -1,0 +1,8 @@
+DISTRO="autosd10"
+RELEASE=""
+UUID="synthetic-build-id"
+TIMESTAMP="2026-11-11 21:38:59 UTC"
+IMAGE_NAME="base"
+IMAGE_MODE="bootc"
+IMAGE_TARGET="ebbr"
+IMAGE_VERSION="4.6.0"

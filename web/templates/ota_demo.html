@@ -1,0 +1,56 @@
+{#- The board's OTA status for an audience. Served by app.py at /ota/demo; ota_demo.js fills it from /api/ota.
+
+    The same answer as /ota (ota.html), fewer details, larger type: what the OS and the application run, what
+    eSync is doing for each, and whether the data is live. The server renders no board data; every value comes
+    through the whitelist in web/ota.py and is written with textContent (tests/test_ota_demo.py). Read-only. -#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>VehicleTap — OTA demo</title>
+<link rel="stylesheet" href="/static/vehicletap.css">
+<link rel="stylesheet" href="/static/ota.css">
+<link rel="stylesheet" href="/static/ota_demo.css">
+</head>
+<body>
+<div class="demo-page" id="demo-root">
+
+<header class="demo-top">
+  <h1>OTA demo
+    <small id="demo-sub"></small></h1>
+  <div class="demo-top-right">
+    <span class="demo-badge none" id="demo-badge" role="status">No data</span>
+    <a class="ota-link" href="/ota" title="Every detail the host reports">Details →</a>
+  </div>
+</header>
+
+<div class="card ota-banner" id="demo-banner" role="status" hidden></div>
+
+<noscript><div class="card ota-banner invalid">This page needs JavaScript to show the status; the same data is at
+  <a href="/api/ota">/api/ota</a>.</div></noscript>
+
+<main class="demo-main" id="demo-main" hidden>
+  <section class="card demo-card">
+    <div class="card-title">OS OTA Status</div>
+    <div id="demo-os"></div>
+  </section>
+
+  <section class="card demo-card">
+    <div class="card-title">APP OTA Status</div>
+    <div id="demo-app"></div>
+  </section>
+
+  <section class="card demo-card demo-esync">
+    <div class="card-title">eSync</div>
+    <div id="demo-esync"></div>
+  </section>
+</main>
+
+</div>
+<script src="/static/html.js"></script>
+<script src="/static/ota.js"></script>
+<script src="/static/ota_demo.js"></script>
+</body>
+</html>

@@ -138,7 +138,7 @@ a unit from starting.
 sudo install -d -m 0755 /var/lib/vehicletap-ota                              # the directory the exporter writes into
 sudo install -d /etc/containers/systemd/vehicletap.container.d
 sudo cp deploy/quadlet/optional/vehicletap.container.d/10-ota.conf /etc/containers/systemd/vehicletap.container.d/
-python3 tools/ota_export.py --out /var/lib/vehicletap-ota/ota_status.json --service esync --interval 30   # as root, kept running somehow
+python3 tools/ota_export.py --out /var/lib/vehicletap-ota/ota_status.json --service esync --interval 5   # as root, kept running somehow
 sudo systemctl daemon-reload && sudo systemctl restart vehicletap
 ```
 

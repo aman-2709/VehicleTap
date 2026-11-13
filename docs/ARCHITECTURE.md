@@ -117,10 +117,13 @@ file, across a trust boundary instead of a process boundary. `web/ota.py` theref
 is a whitelist (unknown keys dropped at every level, strings cleaned and capped, digests and times kept only in their
 one valid form, numbers range-checked), `read()` turns a missing, broken, oversize or old file into a `status`
 (`waiting`, `invalid`, `stale`, `ok`) and never raises, and each read stands alone. `GET /api/ota` serves that
-form with a 200 whatever the file is; `/ota` is a standalone page whose script writes everything with `textContent`.
+form with a 200 whatever the file is; `/ota` and its demo view `/ota/demo` are standalone pages whose scripts write
+everything with `textContent`.
 Nothing in the chain can send anything to the board, and in demo mode the real file is never opened. The writer is
 `tools/ota_export.py`: standalone, a fixed allowlist of read-only commands, a document built from named fields (so a
-registry or a checksum in its inputs cannot reach the file), and an atomic replace.
+registry or a checksum in its inputs cannot reach the file), and an atomic replace. It writes on a fixed rate and reads
+each source at its own pace: files, `/proc` and systemd every pass, `bootc status` every `--os-interval` with its last
+good answer kept, the build stamp and tool versions once; the reader's "stale" follows the interval the file declares.
 
 ## Scheduler
 

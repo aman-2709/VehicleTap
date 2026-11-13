@@ -24,6 +24,7 @@ API:
   /api/ota                       the board's OS-update status as a host process wrote it, cleaned
                                  (docs/OTA.md); always 200, its `status` says waiting/invalid/stale/ok
   /ota                           the page that shows it (read-only)
+  /ota/demo                      the same answer laid out for an audience (read-only)
   /api/tiles                     GET/PUT tile layout (drives what the reader polls)
   /api/signals                   signal registry, colour scales, tile types
   /api/layouts[/<name>[/load]]   named layouts (save / load / delete)
@@ -554,6 +555,12 @@ def ota_page():
     return render_template("ota.html")
 
 
+@app.route("/ota/demo")
+def ota_demo_page():
+    """The demo view: the same /api/ota answer for an audience. No board data in the markup either."""
+    return render_template("ota_demo.html")
+
+
 @app.route("/api/ota")
 def api_ota():
     """What the host wrote about the booted, staged and rollback images, the update components and the
@@ -565,7 +572,7 @@ def api_ota():
         if not isinstance(canned, dict):
             return jsonify({"status": "waiting", "age_s": None, "demo": True,
                             "message": "demo mode has no OTA file"})
-        canned["generated_at"] = ota.format_time(time.time())      # keep demo looking live, like /api/status
+        canned = ota.restamp(canned, time.time())                  # keep demo looking live, like /api/status
         return jsonify(dict(ota.view(canned), demo=True))
     return jsonify(ota.read())
 

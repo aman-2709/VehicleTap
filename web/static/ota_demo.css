@@ -1,0 +1,59 @@
+/* The /ota/demo page (docs/OTA.md "Demo view"): larger type for a shared screen. Palette and .card come from
+   vehicletap.css; .ota-banner, .ota-link and .ota-dot from ota.css. */
+
+.demo-page { max-width: 1200px; margin: 0 auto; padding: 16px; }
+.demo-top {
+  display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; justify-content: space-between;
+  padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--border);
+}
+.demo-top h1 { font-size: 1.5em; font-weight: 600; }
+.demo-top h1 small { display: block; font-weight: 400; font-size: .6em; color: var(--dim); margin-top: 4px; }
+.demo-top-right { display: flex; align-items: center; gap: 14px; }
+
+.demo-badge { border-radius: 999px; padding: 5px 14px; font-size: .85em; font-weight: 600; border: 1px solid var(--border);
+  background: var(--card2); color: var(--dim); white-space: nowrap; }
+.demo-badge.live { color: var(--green); border-color: var(--green); }
+.demo-badge.stale { color: var(--yellow); border-color: var(--yellow); }
+
+.demo-main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.demo-main[hidden] { display: none; }
+.demo-main.stale .demo-card { opacity: .55; }            /* old data stays readable, and looks old */
+.demo-card { min-width: 0; }
+@media (max-width: 800px) { .demo-main { grid-template-columns: minmax(0, 1fr); } }
+
+.demo-pkg { color: var(--dim); font-size: .85em; font-family: ui-monospace, Menlo, monospace; margin-top: 4px; overflow-wrap: anywhere; }
+.demo-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin: 4px 0 14px; }
+.demo-head .k { color: var(--dim); font-size: .9em; }
+.demo-ver { color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-weight: 700; font-size: 2.4em;
+  line-height: 1.1; overflow-wrap: anywhere; }
+.demo-ver.none { color: var(--dim); }
+.demo-digest { color: var(--dim); font-family: ui-monospace, Menlo, monospace; font-size: .85em; }
+
+.demo-slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+.demo-slot { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.demo-slot .k { display: block; color: var(--dim); font-size: .78em; }
+.demo-slot .v { display: block; color: var(--dim); font-family: ui-monospace, Menlo, monospace; font-size: 1.05em;
+  font-weight: 600; overflow-wrap: anywhere; }
+.demo-slot.on .v { color: var(--text); }
+
+.demo-boxes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.demo-boxes.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.demo-boxes + .demo-boxes { margin-top: 8px; }
+.demo-box { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; min-width: 0; }
+.demo-box.wide { grid-column: 1 / -1; }
+.demo-box .k { display: block; color: var(--dim); font-size: .78em; margin-bottom: 3px; overflow-wrap: anywhere; }
+.demo-box .v { display: block; font-size: 1.05em; font-weight: 600; overflow-wrap: anywhere; }
+.demo-box .note { display: block; color: var(--dim); font-size: .82em; margin-top: 2px; }
+.demo-box .v.ok { color: var(--green); }
+.demo-box .v.warn { color: var(--yellow); }
+.demo-box .v.bad { color: var(--red); }
+.demo-box .v.dim, .demo-box .v.idle { color: var(--dim); }
+.demo-box .v.active { color: var(--accent); font-weight: 600; }
+.demo-box .ver { color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+@media (max-width: 420px) { .demo-boxes, .demo-boxes.three { grid-template-columns: minmax(0, 1fr); } }
+
+.demo-sub { margin: 16px 0 8px; color: var(--dim); font-weight: 600; font-size: .72em; text-transform: uppercase; letter-spacing: .08em; }
+.demo-none { color: var(--dim); font-size: .9em; margin: 8px 0; }
+.demo-asof { margin-top: 10px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--yellow); color: var(--yellow); font-size: .85em; }
+
+.demo-esync { grid-column: 1 / -1; }

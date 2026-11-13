@@ -47,6 +47,32 @@ def build(**over):
     return ex.build(sources(**over), now=NOW, mono=MONO, boot=BOOT)
 
 
+def fake_io(**over):
+    """A host that has nothing, unless told: every reader the collector uses, as a namespace."""
+    io = dict(run=lambda c, timeout=10: None, read_file=lambda p: None, statvfs=lambda p: vfs(),
+              kernel_release=lambda: HOST["kernel"], read_state_dir=lambda p: {}, processes=lambda prefix: [],
+              log_tail=lambda p: None)
+    io.update(over)
+    return SimpleNamespace(**io)
+
+
+class FakeClock:
+    """A monotonic clock that moves only when something sleeps or `advance()`s it."""
+
+    def __init__(self, t=1000.0):
+        self.t, self.naps = t, []
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.naps.append(s)
+        self.t += s
+
+    def advance(self, s):
+        self.t += s
+
+
 # ── the document: every section, from real captures ──
 
 def test_the_document_has_the_schema_and_the_time_it_was_made():
@@ -172,10 +198,511 @@ def test_a_missing_input_gives_a_section_that_says_nothing_and_the_rest_still_co
     assert ota.clean(d)["schema"] == 1                           # still a file the dashboard accepts
 
 
+# ── the board's own record: build stamp, update tools, eSync ──
+# Real formats from the J7 (2026-11-12), values replaced: tests/fixtures/ota/{build_info.txt, os_builds.txt,
+# tool_versions.json, esyncclient_tail.txt, esync_state_d/}; os_release.txt and the model are the board's own.
+
+FIX = os.path.join(ROOT, "tests", "fixtures", "ota")
+STATE_D = os.path.join(FIX, "esync_state_d")
+TOOL_OUT = fixture("ota/tool_versions.json")
+LOG_NOW = 1794447400.0                                       # 2026-11-12T01:36:40Z, just after the log's last line
+
+
+def fixture_text(name):
+    with open(os.path.join(FIX, name)) as f:
+        return f.read()
+
+
+def fixture_bytes(name):
+    with open(os.path.join(FIX, name), "rb") as f:
+        return f.read()
+
+
+HOME = "/root/esync"
+IN_UNIT = "0::/system.slice/esync.service\n"
+PROCS = [
+    ([HOME + "/bin/esyncclient", "-c", HOME + "/etc/esync.cfg"], IN_UNIT),
+    ([HOME + "/bin/workloadagent", "-k", HOME + "/data/InVehicle-Certs/pki/certs/rhivos_app", "-t", "/SDK/RHIVOS_APP",
+      "-b", HOME + "/data"], IN_UNIT),
+    # the same agent as eSync's launcher may pass it: each option and its value as one argument
+    ([HOME + "/bin/workloadagent", "-k " + HOME + "/data/InVehicle-Certs/pki/certs/rhivos_os", "-t /SDK/RHIVOS_OS",
+      "-b " + HOME + "/data"], "0::/system.slice/esync.service/payload\n"),
+    ([HOME + "/bin/loggit", "-l", HOME + "/data/log/workloadagent-app.log"], IN_UNIT),
+]
+AGENTS = ("/SDK/RHIVOS_APP", "/SDK/RHIVOS_OS")
+MODEL = "Texas Instruments J784S4 EVM\0"                      # /proc/device-tree/model ends in a NUL
+
+
+def full_sources(**over):
+    s = sources(esync=None, esync_d=ex.read_state_dir(STATE_D), build_info=fixture_text("build_info.txt"),
+                tools=TOOL_OUT, records=fixture_text("os_builds.txt"), processes=PROCS,
+                client_log=fixture_bytes("esyncclient_tail.txt"), os_release=fixture_text("os_release.txt"),
+                board_model=MODEL, interval=5, os_interval=15,
+                esync_config={"home": HOME, "unit": "esync", "topics": AGENTS, "os_package": "RHIVOS-OS-AUTOSD"})
+    s.update(over)
+    return s
+
+
+def build_full(**over):
+    return ex.build(full_sources(**over), now=LOG_NOW, mono=MONO, boot=BOOT)
+
+
+def test_the_build_stamp_is_the_images_version_and_build_time():
+    assert ex.build_info(fixture_text("build_info.txt")) == {"version": "4.6.0", "built_at": "2026-11-11T21:38:59Z"}
+    assert build_full()["os"]["build"] == {"version": "4.6.0", "built_at": "2026-11-11T21:38:59Z"}
+
+
+@pytest.mark.parametrize("raw,want", [
+    (None, None), ("", None), ("garbage\n", None), ('IMAGE_NAME="base"\n', None),
+    ('IMAGE_VERSION="4.3.0"\n', {"version": "4.3.0", "built_at": ""}),
+    ('TIMESTAMP="2026-08-01 20:17:50 UTC"\n', {"version": "", "built_at": "2026-08-01T20:17:50Z"}),
+    ('IMAGE_VERSION=4.3.0\nTIMESTAMP="yesterday"\n', None),                 # unquoted, and not a time
+    ('IMAGE_VERSION="4.3.0"\nTIMESTAMP="2026-13-01 20:17:50 UTC"\n', {"version": "4.3.0", "built_at": ""}),
+    ('  IMAGE_VERSION="4.3.0"  \r\n', {"version": "4.3.0", "built_at": ""}),
+])
+def test_a_build_stamp_is_read_from_its_two_named_lines_only(raw, want):
+    assert ex.build_info(raw) == want
+
+
+def test_the_build_stamps_other_lines_never_get_out():
+    text = json.dumps(build_full()["os"])
+    for word in ("synthetic-build-id", "autosd10", "ebbr", "UUID", "DISTRO"):
+        assert word not in text, word
+
+
+def test_the_os_is_named_by_its_os_release_and_the_board_by_its_device_tree():
+    d = build_full()
+    assert d["os"]["distro"] == "Automotive Stream Distribution 10"
+    assert d["board"] == {"model": "Texas Instruments J784S4 EVM"}
+    assert d["esync"]["os_package"] == "RHIVOS-OS-AUTOSD"
+
+
+@pytest.mark.parametrize("raw,want", [
+    ('PRETTY_NAME="A B 10"\nNAME="A"\nVERSION_ID="9"\n', "A B 10"),         # the pretty name wins
+    ('NAME="Fedora Linux"\nVERSION_ID=42\n', "Fedora Linux 42"),             # else the name and version; bare is fine
+    ("PRETTY_NAME='Single Quoted 1'\n", "Single Quoted 1"),
+    ("NAME=Bare\n", "Bare"),
+    ('PRETTY_NAME="has \\"escape\\""\nNAME="Plain"\n', "Plain"),             # a line that needs the shell is skipped
+    ('PRETTY_NAME="$(id)"\n', ""),
+    ("ID=autosd\nHOME_URL=x\n", ""),                                         # names nothing
+    ("", ""),
+    (None, ""),
+])
+def test_the_os_name_is_the_pretty_name_else_name_and_version(raw, want):
+    assert ex.distro(raw) == want
+
+
+def test_the_rest_of_os_release_never_gets_out():
+    text = json.dumps(build_full())
+    for word in ("sig.centos.org", "cpe:/o", "platform:el10", "fedora-logo", "REDHAT_SUPPORT", "rhel fedora"):
+        assert word not in text, word
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("Texas Instruments J784S4 EVM\0", "Texas Instruments J784S4 EVM"),
+    ("Raspberry Pi 5 Model B Rev 1.0\0", "Raspberry Pi 5 Model B Rev 1.0"),
+    ("No NUL at all", "No NUL at all"),
+    ("Model\0trailing junk after the NUL", "Model"),
+    ("Bad\x01Model\0", ""),                                                   # not printable: nothing
+    ("x" * 500 + "\0", "x" * 120),
+    ("", ""),
+    (None, ""),                                                                  # a PC has no device tree
+])
+def test_the_board_model_is_the_device_trees_text_up_to_its_nul(raw, want):
+    assert ex.board_model(raw) == want
+
+
+def test_os_release_is_read_from_etc_and_else_from_usr_lib():
+    def io_with(files):
+        return fake_io(read_file=lambda p: files.get(p))
+    only_usr = {"/usr/lib/os-release": 'PRETTY_NAME="From Usr"\n'}
+    both = dict(only_usr, **{"/etc/os-release": 'PRETTY_NAME="From Etc"\n'})
+    for files, want in ((both, "From Etc"), (only_usr, "From Usr"), ({}, "")):
+        src = ex.collect(ex.parse_args(["--out", "/x/o.json"]), io_with(files))
+        assert ex.distro(src["os_release"]) == want
+
+
+def test_the_os_package_is_an_option_and_empty_when_not_given():
+    assert ex.parse_args(["--out", "/x/o.json"]).os_package is None
+    src = ex.collect(ex.parse_args(["--out", "/x/o.json", "--os-package", "RHIVOS-OS-AUTOSD"]), fake_io())
+    assert ex.build(src, now=NOW, mono=MONO, boot=BOOT)["esync"]["os_package"] == "RHIVOS-OS-AUTOSD"
+    src = ex.collect(ex.parse_args(["--out", "/x/o.json"]), fake_io())
+    assert ex.build(src, now=NOW, mono=MONO, boot=BOOT)["esync"]["os_package"] == ""
+
+
+@pytest.mark.parametrize("name", ["-x", "a b", "../x", "a/b", "", "x" * 65, "$(id)", "A;B"])
+def test_an_os_package_that_is_not_a_package_name_is_refused(name):
+    with pytest.raises(SystemExit):
+        ex.parse_args(["--out", "/x/o.json", "--os-package", name])
+
+
+def test_the_update_tools_report_their_versions():
+    assert ex.tools(TOOL_OUT) == {"bootc": "1.17.1", "ostree": "2026.4", "podman": "6.1.0"}
+    assert "0000000000" not in json.dumps(build_full()), "ostree's git commit is not a version"
+
+
+@pytest.mark.parametrize("name,raw,want", [
+    ("bootc", "bootc 1.16.6\n", "1.16.6"), ("bootc", "bootc\n", ""), ("bootc", "something 1.0", ""),
+    ("bootc", None, ""), ("bootc", "bootc <script>", ""),
+    ("podman", "podman version 6.0.2\n", "6.0.2"), ("podman", "podman 6.0.2", ""), ("podman", "", ""),
+    ("ostree", "libostree:\n Version: '2026.1'\n", "2026.1"), ("ostree", "Version: 2026.1", ""),
+    ("ostree", " Version: '<b>'\n", ""), ("ostree", None, ""),
+])
+def test_a_tool_version_is_the_version_word_or_nothing(name, raw, want):
+    assert ex.tool_version(name, raw) == want
+
+
+def test_the_build_record_lists_each_version_with_what_it_was_built_with():
+    r = ex.build_records(fixture_text("os_builds.txt"))
+    assert [x["version"] for x in r] == ["4.3.0", "4.6.0", "4.7.1"]              # the comment and blank line skipped
+    assert r[1] == {"version": "4.6.0", "kernel": "6.12.0-281.el10iv.aarch64", "bootc": "1.17.1",
+                    "ostree": "2026.4", "podman": "6.1.0"}
+
+
+@pytest.mark.parametrize("raw", [None, "", "# only a comment\n", "4.6.0 k 1 2\n", "4.6.0 k 1 2 3 4\n",
+                                 "4.6.0 <k> 1 2 3\n", "4.6.0 k 1 2 $(id)\n"])
+def test_a_build_record_line_that_is_not_five_versions_is_skipped(raw):
+    assert ex.build_records(raw) == []
+
+
+def test_build_records_are_capped():
+    raw = "".join(f"{i}.0.0 k b o p\n" for i in range(ex.LIST_MAX + 10))
+    assert len(ex.build_records(raw)) == ex.LIST_MAX
+
+
+def test_components_come_from_the_per_package_files():
+    c = build_full()["components"]
+    assert c == [{"id": "RHIVOS-APP-CANDUMP", "version": "3.4.0", "installed_at": "2026-11-06T01:57:15Z",
+                  "transaction_digest": "sha256:" + "a1" * 32},
+                 {"id": "RHIVOS-OS-AUTOSD", "version": "4.7.0", "installed_at": "2026-11-11T23:45:22Z",
+                  "transaction_digest": "sha256:" + "b2" * 32}]
+    assert "activeSet" not in json.dumps(c) and "synthetic-active-set" not in json.dumps(c)
+
+
+def test_a_packages_own_file_wins_over_the_shared_state_and_the_shared_state_fills_the_rest():
+    """The agent reads state.d/<package>.json first and falls back to state.json (workload_rhivos_common.c)."""
+    shared = {"RHIVOS-APP-CANDUMP": {"version": "3.1.0"}, "OLD-ONLY": {"version": "1.0"}}
+    c = {x["id"]: x["version"] for x in build_full(esync=shared)["components"]}
+    assert c == {"OLD-ONLY": "1.0", "RHIVOS-APP-CANDUMP": "3.4.0", "RHIVOS-OS-AUTOSD": "4.7.0"}
+    assert ex.components(shared, None) == ex.components(shared, {}) == ex.components(shared)
+
+
+def test_reading_state_d_takes_only_regular_json_files_and_skips_a_broken_one(tmp_path, capsys):
+    (tmp_path / "GOOD.json").write_text('{"version": "1"}')
+    (tmp_path / "HALF.json").write_text('{"version": ')               # the agent mid-write
+    (tmp_path / "BIN.json").write_bytes(b"\xff\xfe")
+    (tmp_path / ".HIDDEN.json").write_text('{"version": "2"}')
+    (tmp_path / "notes.txt").write_text("x")
+    (tmp_path / "DIR.json").mkdir()
+    (tmp_path / "BIG.json").write_text('{"v": "' + "x" * ex.STATE_FILE_MAX + '"}')
+    outside = tmp_path.parent / "outside.json"
+    outside.write_text('{"version": "9"}')
+    (tmp_path / "LINK.json").symlink_to(outside)
+    assert ex.read_state_dir(str(tmp_path)) == {"GOOD": {"version": "1"}}
+    err = capsys.readouterr().err
+    assert "HALF.json" in err and "BIN.json" in err and "BIG.json" in err
+
+
+def test_a_state_d_that_does_not_exist_is_no_components_not_an_error(tmp_path):
+    assert ex.read_state_dir(str(tmp_path / "nope")) == {}
+
+
+def test_state_d_is_capped(tmp_path):
+    for i in range(ex.LIST_MAX + 5):
+        (tmp_path / f"P{i:03d}.json").write_text('{"version": "1"}')
+    assert len(ex.read_state_dir(str(tmp_path))) == ex.LIST_MAX
+
+
+def test_the_campaigns_are_the_ones_in_the_client_log_most_recent_first():
+    e = build_full()["esync"]
+    assert e["client_log"] == "ok"
+    assert e["campaigns"] == [
+        {"package": "RHIVOS-APP-CANDUMP", "version": "3.7.0", "campaign": 1001, "last_seen": "2026-11-12T01:36:25Z",
+         "rollback_version": "3.4.0", "result": "ROLLBACK-COMPLETED"},          # the later of its two status lines
+        {"package": "RHIVOS-OS-AUTOSD", "version": "4.7.0", "campaign": 1004, "last_seen": "2026-11-12T01:35:59Z",
+         "rollback_version": "", "result": "NOT-COMPLETED"}]                    # "registered rollback to <null>"
+
+
+def test_nothing_else_in_the_client_log_gets_out():
+    text = json.dumps(build_full())
+    for secret in ("SYNTHETIC-DEVICE-ID", "dmc.example", "apikey-0123", "@2001", "2001", "needs to be", "update_info",
+                   "Package is of", "forced", "pending update", "had QP", "TV:", "considered", "<null>"):
+        assert secret not in text, secret
+
+
+STATUS = (b"11-12:01:%s.100 pui_init:update_info.cpp:313 [main/1] <RHIVOS-X:2.0#7@8> Package is of version 1.0, "
+          b"needs to be of version 2.0, registered rollback to %s (forced:FALSE), pending update: FALSE, had QP: TRUE, "
+          b"TV: FALSE, considered already updated: %s (%s)\n")
+
+
+def status_line(at, rollback, result):
+    return STATUS % (at, rollback, result, result)
+
+
+def test_a_campaigns_rollback_version_and_result_come_from_its_latest_status_line():
+    log = status_line(b"30:00", b"1.0", b"NOT-COMPLETED") + status_line(b"31:00", b"1.0", b"ROLLBACK-COMPLETED")
+    assert ex.campaigns(log, LOG_NOW) == [{"package": "RHIVOS-X", "version": "2.0", "campaign": 7,
+                                           "last_seen": "2026-11-12T01:31:00Z", "rollback_version": "1.0",
+                                           "result": "ROLLBACK-COMPLETED"}]
+    later_first = status_line(b"31:00", b"1.0", b"UPDATE-COMPLETED") + status_line(b"30:00", b"1.0", b"NOT-COMPLETED")
+    assert ex.campaigns(later_first, LOG_NOW)[0]["result"] == "UPDATE-COMPLETED"       # by time, not by place
+
+
+@pytest.mark.parametrize("line", [
+    status_line(b"30:00", b"1.0 && id", b"NOT-COMPLETED"),                  # a rollback that is not a version
+    status_line(b"30:00", b"1.0", b"not-completed"),                        # a result that is not eSync's word
+    b"11-12:01:30:00.100 x <RHIVOS-X:2.0#7@8> Package is of version 1.0, registered rollback to 1.0\n",  # cut short
+])
+def test_a_status_line_that_is_not_the_clients_leaves_the_campaign_without_one(line):
+    assert ex.campaigns(line, LOG_NOW) == [{"package": "RHIVOS-X", "version": "2.0", "campaign": 7,
+                                            "last_seen": "2026-11-12T01:30:00Z", "rollback_version": "", "result": ""}]
+
+
+def test_a_campaign_line_without_a_time_at_its_start_is_not_read():
+    log = (b"mpaign <RHIVOS-X:1.0#7@8> cut off\n"                       # the first line of a tail is often cut
+           b"  <RHIVOS-X:1.0#7@8> continuation\n"
+           b"11-12:01:00:00.000 f:x.cpp:1 [m] <RHIVOS-Y:2.0#9@10> ok\n")
+    assert [c["package"] for c in ex.campaigns(log, LOG_NOW)] == ["RHIVOS-Y"]
+
+
+@pytest.mark.parametrize("log", [None, b"", b"\x00\xff" * 100, "11-12:01:00:00.000 [m] <RHIVOS-Y:2.0#9@10>",
+                                 b"11-12:01:00:00.000 [m] <rhivos-y:2.0#9@10>", b"13-40:01:00:00.000 [m] <RHIVOS-Y:2.0#9@10>",
+                                 b"11-12:01:00:00.000 [m] <RHIVOS-Y:2.0#nine@10>"])
+def test_a_client_log_with_no_readable_campaign_has_none(log):
+    assert ex.campaigns(log, LOG_NOW) == []
+
+
+def test_a_log_time_has_no_year_so_it_is_this_years_unless_that_is_in_the_future():
+    jan_2 = 1798848000.0                                          # 2027-01-02T00:00:00Z
+    assert ex.iso(ex.log_time(12, 31, 23, 59, 0, jan_2)) == "2026-12-31T23:59:00Z"
+    assert ex.iso(ex.log_time(1, 1, 23, 0, 0, jan_2)) == "2027-01-01T23:00:00Z"
+    assert ex.iso(ex.log_time(1, 2, 23, 0, 0, jan_2)) == "2027-01-02T23:00:00Z"    # less than a day ahead: clock skew
+    assert ex.log_time(2, 29, 0, 0, 0, jan_2) is None                               # 2027 and 2026 have no 29 February
+    assert ex.log_time(2, 29, 0, 0, 0, 1709251200.0) is not None                    # 2024-03-01: a leap year
+
+
+def test_the_esync_processes_are_counted_and_all_of_them_are_in_the_unit():
+    e = build_full()["esync"]
+    assert (e["unit"], e["processes"], e["outside_unit"]) == ("esync", 4, 0)       # a sub-cgroup of the unit is in it
+    assert e["agents"] == [{"topic": "/SDK/RHIVOS_APP", "running": 1}, {"topic": "/SDK/RHIVOS_OS", "running": 1}]
+
+
+@pytest.mark.parametrize("cgroup", ["0::/user.slice/user-0.slice/session-3.scope\n", "0::/system.slice/esyncd.service\n",
+                                    "0::/system.slice/esync.service-x\n", "1:name=systemd:/system.slice/esync.service\n",
+                                    "", None])
+def test_a_process_outside_the_units_cgroup_is_counted_as_outside(cgroup):
+    procs = PROCS[:1] + [(PROCS[1][0], cgroup)]
+    assert ex.esync_section(procs, None, LOG_NOW)["outside_unit"] == 1
+
+
+def test_an_agent_that_is_expected_and_not_running_is_listed_with_zero_and_a_duplicate_with_two():
+    procs = [PROCS[1], PROCS[1]]
+    e = ex.esync_section(procs, None, LOG_NOW, home=HOME, topics=AGENTS)
+    assert e["agents"] == [{"topic": "/SDK/RHIVOS_APP", "running": 2}, {"topic": "/SDK/RHIVOS_OS", "running": 0}]
+
+
+def test_an_agent_with_a_topic_nobody_asked_for_is_still_listed():
+    e = ex.esync_section(PROCS, None, LOG_NOW, home=HOME, topics=("/SDK/RHIVOS_APP",))
+    assert [a["topic"] for a in e["agents"]] == ["/SDK/RHIVOS_APP", "/SDK/RHIVOS_OS"]
+
+
+@pytest.mark.parametrize("argv,want", [
+    (["/x/workloadagent", "-t", "/SDK/A"], "/SDK/A"),
+    (["/x/workloadagent", "-t /SDK/A"], "/SDK/A"),
+    (["/x/workloadagent", "-t/SDK/A"], "/SDK/A"),
+    (["/x/workloadagent", "-k", "/a/b", "-t", "/SDK/B_2", "-t", "/SDK/C"], "/SDK/B_2"),
+    (["/x/workloadagent", "-t"], ""),
+    (["/x/workloadagent", "-t", "../../etc/passwd"], ""),
+    (["/x/workloadagent", "-t", "/SDK/A B"], ""),
+    (["/x/workloadagent", "-t", "/" + "a" * 50], ""),
+    (["/x/workloadagent", "--trace", "/SDK/A"], ""),
+    (["/x/workloadagent"], ""),
+    (["-t", "/SDK/A"], ""),                                           # argv[0] is the program, never an option
+])
+def test_an_agents_topic_is_its_t_option_in_either_form_and_nothing_else(argv, want):
+    assert ex.agent_topic(argv) == want
+
+
+def test_only_the_agent_program_counts_as_an_agent():
+    lookalike = (["/root/esync/bin/workloadagent-old", "-t", "/SDK/RHIVOS_APP"], IN_UNIT)
+    e = ex.esync_section([lookalike], None, LOG_NOW, home=HOME, topics=AGENTS)
+    assert all(a["running"] == 0 for a in e["agents"]) and e["processes"] == 1
+
+
+def test_no_esync_on_the_board_is_said_plainly():
+    e = ex.esync_section([], None, LOG_NOW, home=HOME, topics=AGENTS)
+    assert e == {"unit": "esync", "os_package": "", "processes": 0, "outside_unit": 0, "client_log": "unavailable", "campaigns": [],
+                 "agents": [{"topic": "/SDK/RHIVOS_APP", "running": 0}, {"topic": "/SDK/RHIVOS_OS", "running": 0}]}
+
+
+def test_a_proc_that_could_not_be_read_is_unknown_not_zero():
+    e = ex.esync_section(None, None, LOG_NOW, topics=AGENTS)
+    assert e["processes"] is None and e["outside_unit"] is None and {a["running"] for a in e["agents"]} == {None}
+
+
+def test_a_process_command_line_never_gets_out():
+    text = json.dumps(build_full())
+    for secret in ("InVehicle-Certs", "rhivos_app", "loggit", "esync.cfg", "-k", HOME + "/data"):
+        assert secret not in text, secret
+
+
+# ── the host readers, against a fake /proc and real files ──
+
+def fake_proc(root, pid, cmdline, cgroup=IN_UNIT):
+    d = root / str(pid)
+    d.mkdir()
+    if cmdline is not None:
+        (d / "cmdline").write_bytes(cmdline)
+    if cgroup is not None:
+        (d / "cgroup").write_text(cgroup)
+
+
+def test_processes_reads_only_the_programs_under_the_prefix(tmp_path):
+    fake_proc(tmp_path, 10, b"/root/esync/bin/esyncclient\0-c\0/root/esync/etc/x\0")
+    fake_proc(tmp_path, 11, b"/root/esync/bin/workloadagent\0-t\0/SDK/A\0", "0::/user.slice/x.scope\n")
+    fake_proc(tmp_path, 12, b"/root/esync-bak/bin/esyncclient\0")             # not under the prefix
+    fake_proc(tmp_path, 13, b"/usr/bin/python3\0/root/esync/bin/esyncclient\0")
+    fake_proc(tmp_path, 14, b"")                                              # a kernel thread
+    fake_proc(tmp_path, 15, b"/root/esync/bin/gone\0", cgroup=None)           # exited between the two reads
+    fake_proc(tmp_path, 16, None)                                             # exited before
+    (tmp_path / "self").mkdir()
+    (tmp_path / "sys").mkdir()
+    got = sorted(ex.processes("/root/esync/bin/", proc=str(tmp_path)))
+    assert got == [(["/root/esync/bin/esyncclient", "-c", "/root/esync/etc/x"], IN_UNIT),
+                   (["/root/esync/bin/workloadagent", "-t", "/SDK/A"], "0::/user.slice/x.scope\n")]
+
+
+def test_processes_on_this_machine_finds_this_process():
+    """The real /proc, read the real way: this test's own process has a command line and a cgroup."""
+    with open("/proc/self/cmdline", "rb") as f:
+        me = f.read().split(b"\0")
+    found = ex.processes(me[0].decode())
+    assert [a.decode() for a in me if a] in [argv for argv, _ in found]
+    assert all(cg.startswith("0::") for _, cg in found)
+
+
+def test_the_log_tail_is_the_end_of_the_file(tmp_path):
+    p = tmp_path / "esyncclient.log"
+    p.write_bytes(b"a" * 100 + b"\nlast line\n")
+    assert ex.log_tail(str(p), limit=10) == b"last line\n"
+    assert ex.log_tail(str(p)) == p.read_bytes()
+    assert ex.log_tail(str(tmp_path / "rotated-away")) is None
+
+
+# ── how often: each source at its own pace ──
+
+def counting_io(bootc=lambda: json.dumps(BOOTC), tool=lambda name: TOOL_OUT[name]):
+    calls = []
+
+    def run(cmd, timeout=10):
+        calls.append(tuple(cmd))
+        if cmd[:2] == ["bootc", "status"]:
+            return bootc()
+        if tuple(cmd) in {tuple(v) for v in ex.TOOL_COMMANDS.values()}:
+            return tool(cmd[0])
+        return HOST["ntp"] if cmd[0] == "timedatectl" else HOST["systemctl_show"]["esync"]
+
+    return calls, fake_io(run=run, read_file=lambda p: fixture_text("build_info.txt") if p == "/etc/build-info" else None)
+
+
+def args(*extra):
+    return ex.parse_args(["--out", "/x/o.json", "--service", "esync", "--interval", "5", *extra])
+
+
+def passes(collector, n, step=5.0, t0=LOG_NOW, m0=500.0):
+    return [collector.collect(t0 + i * step, m0 + i * step) for i in range(n)]
+
+
+def test_bootc_is_asked_at_the_os_interval_and_the_cheap_sources_on_every_pass():
+    calls, io = counting_io()
+    srcs = passes(ex.Collector(args(), io), 7)                    # 0, 5, ... 30 s
+    assert calls.count(("bootc", "status", "--format", "json")) == 3          # at 0, 15 and 30 s
+    assert sum(c[0] == "systemctl" for c in calls) == 7
+    assert [s["bootc_at"] for s in srcs] == [LOG_NOW] * 3 + [LOG_NOW + 15] * 3 + [LOG_NOW + 30]
+    assert all(s["interval"] == 5 and s["os_interval"] == 15 for s in srcs)
+
+
+def test_the_build_stamp_and_the_tool_versions_are_read_once():
+    calls, io = counting_io()
+    passes(ex.Collector(args(), io), 12)
+    for cmd in ex.TOOL_COMMANDS.values():
+        assert calls.count(tuple(cmd)) == 1, cmd
+
+
+def test_a_tool_that_did_not_answer_is_asked_again_at_the_os_interval_until_it_does():
+    answers = iter([None, None, "podman version 6.1.0\n"])
+    calls, io = counting_io(tool=lambda name: next(answers) if name == "podman" else TOOL_OUT[name])
+    srcs = passes(ex.Collector(args(), io), 10)                  # 0 .. 45 s: OS passes at 0, 15, 30, 45
+    assert calls.count(("podman", "-v")) == 3
+    assert [ex.tools(s["tools"])["podman"] for s in srcs] == [""] * 6 + ["6.1.0"] * 4
+
+
+def test_a_failed_bootc_call_keeps_the_last_good_answer_with_the_time_it_was_given():
+    answers = iter([json.dumps(BOOTC), None, "not json", json.dumps({"status": None})])
+    calls, io = counting_io(bootc=lambda: next(answers))
+    c = ex.Collector(args(), io)
+    srcs = passes(c, 10)                                          # OS passes at 0 (good), 15, 30, 45 (all bad)
+    assert all(s["bootc"] == BOOTC for s in srcs) and {s["bootc_at"] for s in srcs} == {LOG_NOW}
+    d = ex.build(srcs[-1], now=LOG_NOW + 45, mono=MONO, boot=BOOT)
+    assert d["os"]["booted"]["version"] == "4.4.0" and d["os"]["as_of"] == ex.iso(LOG_NOW)
+
+
+def test_bootc_never_answering_leaves_the_os_section_empty_and_says_so():
+    calls, io = counting_io(bootc=lambda: None)
+    src = passes(ex.Collector(args(), io), 1)[0]
+    d = ex.build(src, now=LOG_NOW, mono=MONO, boot=BOOT)
+    assert d["os"]["booted"] is None and d["os"]["as_of"] == ""
+
+
+def test_a_one_shot_document_is_as_of_now_and_declares_no_interval():
+    d = build()
+    assert d["os"]["as_of"] == d["generated_at"] and d["interval_s"] is None and d["os_interval_s"] is None
+    assert build(bootc=None)["os"]["as_of"] == "" and build(bootc="junk")["os"]["as_of"] == ""
+
+
+def test_the_loop_keeps_a_fixed_rate_whatever_a_pass_costs(tmp_path, monkeypatch):
+    fakes(monkeypatch)
+    clock = FakeClock()
+
+    class Slow:
+        costs = iter([2.0, 0.5, 7.0, 1.0])                         # the third pass overruns the 5 s interval
+
+        def document(self):
+            clock.advance(next(self.costs))
+            return {"schema": 1}
+
+    def nap(s):
+        clock.sleep(s)
+        if len(clock.naps) == 4:
+            raise KeyboardInterrupt
+
+    assert ex.main(["--out", str(tmp_path / "o.json"), "--interval", "5"], sleep=nap, clock=clock,
+                   collector=Slow()) == 0
+    assert clock.naps == [3.0, 4.5, 0, 4.0]                       # an overrun starts the next pass at once, no burst
+
+
+@pytest.mark.parametrize("flag,value", [("--agent", "RHIVOS_APP"), ("--agent", "/SDK/A B"), ("--agent", "-t"),
+                                        ("--esync-home", "root/esync"), ("--esync-home", "/root/../etc"),
+                                        ("--esync-home", "/"), ("--esync-unit", "-x"), ("--esync-unit", "a/b"),
+                                        ("--os-interval", "0"), ("--os-interval", "x")])
+def test_bad_esync_and_cadence_options_are_refused(flag, value):
+    with pytest.raises(SystemExit):
+        ex.parse_args(["--out", "/x/o.json", flag, value])
+
+
+def test_the_esync_options_have_board_defaults_and_take_a_trailing_slash():
+    a = ex.parse_args(["--out", "/x/o.json"])
+    assert (a.esync_home, a.esync_unit, a.agent, a.os_interval) == ("/root/esync", "esync", [], 15)
+    assert ex.parse_args(["--out", "/x/o.json", "--esync-home", "/opt/esync/"]).esync_home == "/opt/esync"
+
+
 # ── what must never get out ──
 
+# bootc's ostree block (checksums, deploy serials, the stateroot) must not get out. "ostree" itself is now a
+# word the output may hold: the update tool of that name reports its version (os.tools.ostree).
+OSTREE_CHECKSUMS = [BOOTC["status"][k]["ostree"]["checksum"] for k in ("booted", "rollback")]
 SECRETS = ["registry.invalid", "example/os-image", "apikey-0123", "tok_live_abc", "192.0.2.7", "serial-SYNTH-0001",
-           "hostname.corp", "ostree"]
+           "hostname.corp", *OSTREE_CHECKSUMS]
 
 
 def poisoned():
@@ -202,18 +729,21 @@ def test_nothing_in_the_inputs_but_the_named_fields_reaches_the_output():
 
 
 def test_the_real_capture_alone_leaks_no_registry_checksum_or_server_field():
-    text = json.dumps(build())
-    for word in ("registry", "transport", "checksum", "ostree", "stateroot", "image\"", "spec", "bootOrder"):
+    text = json.dumps(build_full())
+    for word in ("registry", "transport", "checksum", "stateroot", "deploySerial", "image\"", "spec", "bootOrder",
+                 *OSTREE_CHECKSUMS):
         assert word not in text, word
 
 
 def test_the_output_is_what_the_dashboards_reader_accepts_whole():
     """Nothing the exporter writes is dropped or blanked by the whitelist on the other side."""
-    d = build()
+    d = build_full()
     out = ota.clean(d)
-    for key in ("os", "components", "services", "health"):
+    for key in ("os", "components", "services", "esync", "health", "board", "interval_s", "os_interval_s"):
         assert out[key] == d[key], key
     assert out["next_boot"]["version"] == "4.5.0" and out["next_boot"]["source"] == "rollback"
+    assert d["esync"]["campaigns"] and d["esync"]["agents"] and d["os"]["build_records"]   # not vacuous
+    assert d["os"]["distro"] and d["board"]["model"] and d["esync"]["os_package"]
 
 
 def test_the_output_is_strict_json():
@@ -225,6 +755,9 @@ def test_the_output_is_strict_json():
 READ_ONLY = {
     ("bootc", "status", "--format", "json"),
     ("timedatectl", "show", "-p", "NTPSynchronized"),
+    ("bootc", "-V"),
+    ("ostree", "--version"),
+    ("podman", "-v"),
 }
 
 
@@ -235,8 +768,7 @@ def test_the_commands_it_may_run_are_reads_and_nothing_else():
         ran.append(tuple(cmd))
         return {"bootc": json.dumps(BOOTC), "timedatectl": HOST["ntp"]}.get(cmd[0], HOST["systemctl_show"]["esync"])
 
-    io = SimpleNamespace(run=fake, read_file=lambda p: json.dumps(ESYNC), statvfs=lambda p: vfs(),
-                         kernel_release=lambda: HOST["kernel"])
+    io = fake_io(run=fake, read_file=lambda p: json.dumps(ESYNC))
     ex.collect(ex.parse_args(["--out", "/x/ota.json", "--service", "esync", "--service", "cangen"]), io)
     assert ran, "nothing was collected"
     for cmd in ran:
@@ -246,16 +778,22 @@ def test_the_commands_it_may_run_are_reads_and_nothing_else():
     assert not forbidden & {part for cmd in ran for part in cmd}
 
 
-def test_it_reads_one_esync_file_and_no_other():
+def test_it_reads_the_named_files_and_no_other():
+    """eSync's directories also hold its certificates, its device tree and audit records: only the component
+    state, and the client log's tail, are opened. /proc is read only for the SDK's own processes."""
     seen = []
 
-    def read(path):
-        seen.append(path)
-        return json.dumps(ESYNC)
+    def note(kind):
+        return lambda path, *a: (seen.append((kind, path)), None)[1]
 
-    io = SimpleNamespace(run=lambda c, timeout=10: None, read_file=read, statvfs=lambda p: vfs(), kernel_release=lambda: "k")
-    ex.collect(ex.parse_args(["--out", "/x/ota.json"]), io)
-    assert seen == ["/var/lib/esync/state.json", "/sys/fs/selinux/enforce"]
+    io = fake_io(read_file=note("file"), read_state_dir=note("state dir"), processes=note("processes"),
+                 log_tail=note("log"))
+    ex.collect(ex.parse_args(["--out", "/x/ota.json", "--build-record", "/opt/kit/os-builds.txt"]), io)
+    assert seen == [("file", "/var/lib/esync/state.json"), ("state dir", "/var/lib/esync/state.d"),
+                    ("processes", "/root/esync/bin/"), ("log", "/root/esync/data/log/esyncclient.log"),
+                    ("file", "/sys/fs/selinux/enforce"), ("file", "/opt/kit/os-builds.txt"),
+                    ("file", "/etc/build-info"), ("file", "/etc/os-release"), ("file", "/usr/lib/os-release"),
+                    ("file", "/proc/device-tree/model")]
 
 
 @pytest.mark.parametrize("name", ["--help", "-p", "-x", "a b", "a;b", "a\nb", "$(id)", "a/b", "", "x" * 300, "../x"])
@@ -273,11 +811,18 @@ def test_collecting_survives_every_source_failing():
     def boom(*a, **k):
         raise OSError("nope")
 
-    io = SimpleNamespace(run=lambda c, timeout=10: None, read_file=boom, statvfs=boom, kernel_release=boom)
-    src = ex.collect(ex.parse_args(["--out", "/x/o.json", "--service", "esync"]), io)
+    io = SimpleNamespace(run=lambda c, timeout=10: None, read_file=boom, statvfs=boom, kernel_release=boom,
+                         read_state_dir=boom, processes=boom, log_tail=boom)
+    src = ex.collect(ex.parse_args(["--out", "/x/o.json", "--service", "esync", "--agent", "/SDK/A",
+                                    "--build-record", "/x/r.txt"]), io)
     d = ex.build(src, now=NOW, mono=MONO, boot=BOOT)
     assert d["os"]["booted"] is None and d["components"] == [] and d["services"][0]["active_state"] == "unknown"
-    assert d["schema"] == 1
+    assert d["os"]["build"] is None and d["os"]["tools"] == {"bootc": "", "ostree": "", "podman": ""}
+    assert d["os"]["build_records"] == [] and d["os"]["as_of"] == ""
+    assert d["esync"] == {"unit": "esync", "os_package": "", "processes": None, "outside_unit": None,
+                          "agents": [{"topic": "/SDK/A", "running": None}], "client_log": "unavailable", "campaigns": []}
+    assert d["os"]["distro"] == "" and d["board"] == {"model": ""}
+    assert d["schema"] == 1 and ota.clean(d)["schema"] == 1
 
 
 # ── the file ──
@@ -330,6 +875,9 @@ def fakes(monkeypatch):
     monkeypatch.setattr(ex, "read_file", lambda p: json.dumps(ESYNC) if "esync" in p else HOST["selinux_enforce"])
     monkeypatch.setattr(ex, "statvfs", lambda p: vfs())
     monkeypatch.setattr(ex, "kernel_release", lambda: HOST["kernel"])
+    monkeypatch.setattr(ex, "read_state_dir", lambda p: {})
+    monkeypatch.setattr(ex, "processes", lambda prefix: [])
+    monkeypatch.setattr(ex, "log_tail", lambda p: None)
 
 
 def test_one_shot_writes_the_file_and_exits_zero(tmp_path, monkeypatch):
@@ -359,16 +907,16 @@ def test_interval_mode_keeps_going_after_a_bad_pass(tmp_path, monkeypatch, capsy
             raise OSError("disk hiccup")
         return real_write(path, doc)
 
-    naps = []
+    clock = FakeClock()
 
     def nap(s):
-        naps.append(s)
-        if len(naps) == 3:
+        clock.sleep(s)
+        if len(clock.naps) == 3:
             raise KeyboardInterrupt
 
     monkeypatch.setattr(ex, "write_atomic", flaky)
-    assert ex.main(["--out", str(out), "--interval", "30"], sleep=nap) == 0
-    assert calls["n"] == 3 and naps == [30, 30, 30]
+    assert ex.main(["--out", str(out), "--interval", "30"], sleep=nap, clock=clock) == 0
+    assert calls["n"] == 3 and clock.naps == [30, 30, 30]
     assert out.exists() and "disk hiccup" in capsys.readouterr().err
 
 

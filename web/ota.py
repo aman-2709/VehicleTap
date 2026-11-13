@@ -8,12 +8,14 @@ status, and the page says what it means:
 
     waiting   no file yet (the exporter has not run, or the directory is not mounted)
     invalid   there is a file and it cannot be used (not JSON, wrong schema, no usable timestamp, too big)
-    stale     it parsed, but it is old (or its clock is ahead of ours): shown, labelled with its age
+    stale     it parsed, but it is old (or its clock is ahead of ours): shown, labelled with its age. Old
+              means four missed writes at the interval the file declares, or 5 minutes if it declares none
     ok        fresh
 
 Each read stands alone: an invalid file never shows the last good one.
 """
 
+import copy
 import json
 import os
 import re
@@ -30,10 +32,16 @@ SCHEMA = 1
 FILE_MAX = 65_536          # bytes; a real file is ~1 KB. Larger is refused unparsed.
 TEXT_MAX = 120             # one cleaned string
 LIST_MAX = 32              # components, and services
-COUNT_MAX = 1_000_000      # a restart counter
+COUNT_MAX = 1_000_000      # a restart counter, a process count
 BYTES_MAX = 10 ** 15
-STALE_AFTER_S = 300        # the exporter's default interval is 30 s
+CAMPAIGN_MAX = 10 ** 10    # a DMC campaign number
+INTERVAL_MAX = 86400       # seconds; what the exporter accepts
+STALE_AFTER_S = 300        # a file that declares no interval (a one-shot run, an older exporter)
+STALE_MISSED = 4           # a file that declares its interval is stale after this many missed writes ...
+STALE_MIN_S = 20           # ... and never sooner than this
 SKEW_S = 60                # a timestamp this far ahead of our clock is clock skew, not "now"
+TOOLS = ("bootc", "ostree", "podman")
+CLIENT_LOG_STATES = ("ok", "unavailable")
 
 ACTIVE_STATES = ("active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance")
 SELINUX_MODES = ("enforcing", "permissive", "disabled")
@@ -41,6 +49,7 @@ SELINUX_MODES = ("enforcing", "permissive", "disabled")
 _TIME = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]{1,9})?"
                    r"(Z|[+-][0-9]{2}:[0-9]{2})")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+_RESULT = re.compile(r"[A-Z][A-Z-]{0,39}")                  # eSync's word for a campaign's state: ROLLBACK-COMPLETED
 
 
 def path():
@@ -78,6 +87,31 @@ def parse_time(text):
 def format_time(epoch):
     """'2026-08-07T23:03:53Z' for epoch seconds."""
     return datetime.fromtimestamp(int(epoch), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def restamp(raw, now):
+    """A copy of a parsed file moved in time so that it was written at `now`, for a sample that is otherwise
+    weeks old (demo mode). `generated_at` becomes `now`, and the times that say how recent an observation is
+    (`os.as_of`, each campaign's `last_seen`) move with it, so their ages are kept. Build, install and start
+    times are history and stay where they are."""
+    out = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+    then = parse_time(out.get("generated_at"))
+    out["generated_at"] = format_time(now)
+    if then is None:
+        return out
+    shift = int(now) - then
+
+    def move(holder, key):
+        t = parse_time(holder.get(key)) if isinstance(holder, dict) else None
+        if t is not None:
+            holder[key] = format_time(t + shift)
+
+    move(out.get("os"), "as_of")
+    esync = out.get("esync")
+    campaigns = esync.get("campaigns") if isinstance(esync, dict) else None
+    for campaign in campaigns if isinstance(campaigns, list) else []:
+        move(campaign, "last_seen")
+    return out
 
 
 # ── the whitelist ────────────────────────────────────────────────────────
@@ -138,11 +172,65 @@ def _service(r):
             "restarts": _int(r.get("restarts"), COUNT_MAX)}
 
 
+def _build(raw):
+    """The image's build stamp: the version it was stamped with and when it was built."""
+    if not isinstance(raw, dict):
+        return None
+    b = {"version": _text(raw.get("version")), "built_at": _when(raw.get("built_at"))}
+    return b if b["version"] or b["built_at"] else None
+
+
+def _tools(raw):
+    raw = raw if isinstance(raw, dict) else {}
+    return {name: _text(raw.get(name)) for name in TOOLS}
+
+
+def _record(r):
+    return {k: _text(r.get(k)) for k in ("version", "kernel") + TOOLS}
+
+
 def _os(raw):
     raw = raw if isinstance(raw, dict) else {}
     return {"booted": _image(raw.get("booted")), "staged": _image(raw.get("staged")),
             "rollback": _image(raw.get("rollback")), "rollback_queued": raw.get("rollback_queued") is True,
-            "kernel": _text(raw.get("kernel")), "booted_at": _when(raw.get("booted_at"))}
+            "kernel": _text(raw.get("kernel")), "booted_at": _when(raw.get("booted_at")),
+            "as_of": _when(raw.get("as_of")), "build": _build(raw.get("build")), "tools": _tools(raw.get("tools")),
+            "build_records": _entries(raw.get("build_records"), "version", _record), "distro": _text(raw.get("distro"))}
+
+
+def _agent(r):
+    return {"topic": _text(r.get("topic")), "running": _int(r.get("running"), COUNT_MAX)}
+
+
+def _campaign(r):
+    result = r.get("result")
+    return {"package": _text(r.get("package")), "version": _text(r.get("version")),
+            "campaign": _int(r.get("campaign"), CAMPAIGN_MAX), "last_seen": _when(r.get("last_seen")),
+            "rollback_version": _text(r.get("rollback_version")),
+            "result": result if isinstance(result, str) and _RESULT.fullmatch(result) else ""}
+
+
+def _esync(raw):
+    """The eSync stack as the host saw it. `processes` and `outside_unit` are null when unknown."""
+    raw = raw if isinstance(raw, dict) else {}
+    log = raw.get("client_log")
+    return {"unit": _text(raw.get("unit")), "os_package": _text(raw.get("os_package")),
+            "processes": _int(raw.get("processes"), COUNT_MAX),
+            "outside_unit": _int(raw.get("outside_unit"), COUNT_MAX),
+            "agents": _entries(raw.get("agents"), "topic", _agent),
+            "client_log": log if log in CLIENT_LOG_STATES else "unavailable",
+            "campaigns": _entries(raw.get("campaigns"), "package", _campaign)}
+
+
+def _board(raw):
+    """The board's model, as its device tree names it. A model, not an identifier: no serial number."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {"model": _text(raw.get("model"))}
+
+
+def _interval(v):
+    """A declared interval in whole seconds, 1 to a day, else None."""
+    return v if type(v) is int and 1 <= v <= INTERVAL_MAX else None
 
 
 def _health(raw):
@@ -168,6 +256,47 @@ def next_boot(os_):
     return {"source": source, "version": img["version"], "digest": img["digest"]}
 
 
+def build_check(os_):
+    """Is the running image the build its version names? Derived, not read:
+
+    stamp   the version the image was stamped with at build time against the version bootc says is booted:
+            match, mismatch, missing (no stamp), unknown (bootc names no version)
+    record  the kernel and update tools running against what the build record says that version was built
+            with: match, mismatch (with what differs), none (no record for that version), unknown (bootc names
+            no version), off (no record file given to the exporter)
+
+    A relabelled image (one build re-tagged with a new version) shows as a stamp mismatch; a different build
+    published under a recorded version shows as a record mismatch."""
+    booted = (os_["booted"] or {}).get("version", "")
+    stamp_version = (os_["build"] or {}).get("version", "")
+    if not booted:
+        stamp = "unknown"
+    elif not stamp_version:
+        stamp = "missing"
+    else:
+        stamp = "match" if stamp_version == booted else "mismatch"
+    differs = []
+    if not os_["build_records"]:
+        record = "off"
+    elif not booted:
+        record = "unknown"
+    else:
+        want = next((r for r in os_["build_records"] if r["version"] == booted), None)
+        if want is None:
+            record = "none"
+        else:
+            have = {"kernel": os_["kernel"], **os_["tools"]}
+            differs = [{"name": k, "have": have[k], "want": want[k]} for k in ("kernel",) + TOOLS if have[k] != want[k]]
+            record = "mismatch" if differs else "match"
+    return {"stamp": stamp, "record": record, "differs": differs}
+
+
+def stale_after(interval_s):
+    """Seconds after which a file is stale: STALE_MISSED writes at its declared interval (STALE_MIN_S at
+    least), else STALE_AFTER_S."""
+    return max(STALE_MIN_S, STALE_MISSED * interval_s) if interval_s else STALE_AFTER_S
+
+
 def clean(raw):
     """The whitelisted form of a parsed status file. ValueError (with a plain-English reason) if it is not
     a schema-1 object with a usable generated_at; everything else bad is dropped or blanked, not refused."""
@@ -179,10 +308,14 @@ def clean(raw):
     if parse_time(stamp) is None:
         raise ValueError("generated_at is missing or is not an ISO-8601 time with a zone")
     os_ = _os(raw.get("os"))
-    return {"schema": SCHEMA, "generated_at": stamp, "os": os_,
+    return {"schema": SCHEMA, "generated_at": stamp,
+            "interval_s": _interval(raw.get("interval_s")), "os_interval_s": _interval(raw.get("os_interval_s")),
+            "os": os_,
             "components": _entries(raw.get("components"), "id", _component),
             "services": _entries(raw.get("services"), "name", _service),
-            "health": _health(raw.get("health")), "next_boot": next_boot(os_)}
+            "esync": _esync(raw.get("esync")),
+            "health": _health(raw.get("health")), "board": _board(raw.get("board")),
+            "next_boot": next_boot(os_), "build_check": build_check(os_)}
 
 
 # ── the answer ───────────────────────────────────────────────────────────
@@ -202,7 +335,7 @@ def view(raw, now=None):
     if age < -SKEW_S:
         msg = f"the exporter's clock is ahead of this machine's by {_age_text(-age)}"
         return {"status": "stale", "age_s": None, "message": msg, **data}
-    if age > STALE_AFTER_S:
+    if age > stale_after(data["interval_s"]):
         return {"status": "stale", "age_s": round(age, 1), "message": f"last written {_age_text(age)} ago", **data}
     return {"status": "ok", "age_s": round(max(age, 0), 1), "message": "", **data}
 

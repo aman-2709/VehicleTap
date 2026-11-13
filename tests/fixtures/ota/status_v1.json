@@ -1,6 +1,8 @@
 {
   "schema": 1,
   "generated_at": "2026-10-28T03:30:00Z",
+  "interval_s": 5,
+  "os_interval_s": 15,
   "os": {
     "booted": {
       "version": "4.4.0",
@@ -15,7 +17,34 @@
     },
     "rollback_queued": true,
     "kernel": "6.12.0-251.el10iv.aarch64",
-    "booted_at": "2026-10-27T23:47:19Z"
+    "booted_at": "2026-10-27T23:47:19Z",
+    "as_of": "2026-10-28T03:29:48Z",
+    "build": {
+      "version": "4.4.0",
+      "built_at": "2026-08-07T22:41:09Z"
+    },
+    "tools": {
+      "bootc": "1.16.6",
+      "ostree": "2026.1",
+      "podman": "6.0.2"
+    },
+    "build_records": [
+      {
+        "version": "4.4.0",
+        "kernel": "6.12.0-251.el10iv.aarch64",
+        "bootc": "1.16.6",
+        "ostree": "2026.1",
+        "podman": "6.0.2"
+      },
+      {
+        "version": "4.5.0",
+        "kernel": "6.12.0-251.el10iv.aarch64",
+        "bootc": "1.16.6",
+        "ostree": "2026.1",
+        "podman": "6.0.2"
+      }
+    ],
+    "distro": "Automotive Stream Distribution 10"
   },
   "components": [
     {
@@ -54,10 +83,48 @@
       "restarts": 0
     }
   ],
+  "esync": {
+    "unit": "esync",
+    "processes": 7,
+    "outside_unit": 0,
+    "agents": [
+      {
+        "topic": "/SDK/RHIVOS_APP",
+        "running": 1
+      },
+      {
+        "topic": "/SDK/RHIVOS_OS",
+        "running": 1
+      }
+    ],
+    "client_log": "ok",
+    "campaigns": [
+      {
+        "package": "RHIVOS-OS-AUTOSD",
+        "version": "4.5.0",
+        "campaign": 1003,
+        "last_seen": "2026-10-28T03:29:51Z",
+        "rollback_version": "4.4.0",
+        "result": "NOT-COMPLETED"
+      },
+      {
+        "package": "RHIVOS-APP-CANDUMP",
+        "version": "3.7.0",
+        "campaign": 1001,
+        "last_seen": "2026-10-28T03:29:51Z",
+        "rollback_version": "3.4.0",
+        "result": "ROLLBACK-COMPLETED"
+      }
+    ],
+    "os_package": "RHIVOS-OS-AUTOSD"
+  },
   "health": {
     "selinux": "enforcing",
     "ntp_synced": true,
     "var_used_pct": 25.0,
     "var_free_bytes": 22000000000
+  },
+  "board": {
+    "model": "Texas Instruments J784S4 EVM"
   }
 }
