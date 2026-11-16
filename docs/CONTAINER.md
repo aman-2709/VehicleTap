@@ -26,6 +26,32 @@ ssh -L 5000:127.0.0.1:5000 -L 8099:127.0.0.1:8099 <user>@<board>
 # then open http://127.0.0.1:5000  and  http://127.0.0.1:5000/sim
 ```
 
+**A tunnel that comes back after the board reboots.** An image-mode board (bootc, RHIVOS) rebuilds `/etc` at
+every boot, so it has a new SSH host key each time and `ssh` refuses the next connection ("REMOTE HOST
+IDENTIFICATION HAS CHANGED"); and a plain `ssh -L` does not reconnect. Give the board two names in
+`~/.ssh/config` on the laptop, the tunnel's block first (ssh takes the first value it finds for each setting):
+
+```
+Host board-dash
+    LocalForward 5000 127.0.0.1:5000
+    LocalForward 8099 127.0.0.1:8099
+    ExitOnForwardFailure yes
+
+Host board board-dash
+    HostName <board>
+    User <user>
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+    ServerAliveInterval 5
+    ServerAliveCountMax 2
+```
+
+and keep the tunnel in a loop: `while true; do ssh -N board-dash; sleep 3; done`. It reconnects within seconds
+of the board being back, and the open page fills in again by itself. `ssh board` is for logging in: with the
+forwards only on `board-dash`, a login never competes with the tunnel for the ports. The two host-key settings
+switch off the key check for this one board, which suits a lab network.
+
 This is the **rootful** flow, and every step on the board must be root: a Quadlet
 unit under `/etc/containers/systemd/` runs as root and sees only root's image
 store, so an image loaded by a normal user (`podman load` without `sudo`) is

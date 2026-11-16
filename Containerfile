@@ -1,6 +1,6 @@
 # VehicleTap dashboard + simulator as an OCI image (docs/CONTAINER.md).
 #
-#   podman build --platform linux/arm64 -t vehicletap .      # for a TDA4 / Jacinto 7 board
+#   podman build --platform linux/arm64 -t vehicletap .      # for an arm64 board
 #
 # The app binds 127.0.0.1 only, on purpose (SECURITY.md). Run it with host
 # networking, not -p: a published port cannot reach a container's own loopback.
