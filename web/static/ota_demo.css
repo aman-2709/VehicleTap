@@ -76,3 +76,36 @@
 .demo-attempt-note.warn { border-color: var(--yellow); color: var(--yellow); }
 .demo-attempt-note.active { border-color: var(--accent); color: var(--accent); }
 .demo-attempt-note + .demo-boxes { margin-top: 8px; }
+
+/* Something is happening. Three kinds of motion, all from the board's data and all CSS (ota_demo.js sets the classes):
+   - the Live badge's dot beats once for each status the board writes (beat-a and beat-b are the same animation under
+     two names: a new class name restarts it); no beat when the board goes quiet;
+   - a campaign in progress, or a staged update, pulses (.active): a dot, and the result line breathes;
+   - a fact that changed since the last render flashes once (.changed).
+   The page redraws a card at every poll (5 s), which restarts a CSS animation, so the two loops run for a period that
+   divides 5 s: they start over exactly where they end. */
+.demo-badge.live::before { content: ''; display: inline-block; width: .55em; height: .55em; margin-right: .5em;
+  border-radius: 50%; background: var(--green); color: var(--green); }
+.demo-badge.live.beat-a::before { animation: demo-beat-a 1s ease-out; }
+.demo-badge.live.beat-b::before { animation: demo-beat-b 1s ease-out; }
+@keyframes demo-beat-a { 0% { transform: scale(1); box-shadow: 0 0 0 0 currentColor; }
+                         35% { transform: scale(1.6); } 100% { transform: scale(1); box-shadow: 0 0 0 .7em transparent; } }
+@keyframes demo-beat-b { 0% { transform: scale(1); box-shadow: 0 0 0 0 currentColor; }
+                         35% { transform: scale(1.6); } 100% { transform: scale(1); box-shadow: 0 0 0 .7em transparent; } }
+
+.demo-attempt-title.active::before, .demo-box .v.active::before { content: ''; display: inline-block; width: .6em; height: .6em;
+  margin-right: .5em; border-radius: 50%; background: var(--accent); animation: demo-pulse 1.25s ease-in-out infinite; }
+.demo-attempt-note.active { animation: demo-breathe 2.5s ease-in-out infinite; }
+@keyframes demo-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .3; transform: scale(.65); } }
+@keyframes demo-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 .9em 0 var(--accent); } }
+
+.demo-box.changed, .demo-head.changed, .demo-attempt-note.changed { animation: demo-flash 1.6s ease-out; border-radius: 8px; }
+@keyframes demo-flash { from { background: rgba(79, 195, 247, .32); box-shadow: 0 0 0 4px rgba(79, 195, 247, .32); }
+                        to { background: transparent; box-shadow: 0 0 0 4px transparent; } }
+
+/* Reduced motion: the same facts, still. The dots stay, the beat, the breathing and the flash stop. */
+@media (prefers-reduced-motion: reduce) {
+  .demo-badge.live.beat-a::before, .demo-badge.live.beat-b::before,
+  .demo-attempt-title.active::before, .demo-box .v.active::before, .demo-attempt-note.active { animation: none; }
+  .demo-box.changed, .demo-head.changed, .demo-attempt-note.changed { animation: none; background: rgba(79, 195, 247, .18); }
+}

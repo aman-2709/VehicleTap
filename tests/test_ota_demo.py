@@ -7,6 +7,7 @@ filled in. The page logic is pure and run in node; the render runs against the s
 import copy
 import json
 import os
+import re
 import time
 
 from test_ota_api import FAKE_DOM, OTA_JS, STATIC, TEMPLATES, api, fresh, needs_node, node, read  # noqa: F401  (api: fixture)
@@ -250,7 +251,7 @@ def attempt(pkg, running="3.4.0", known=True):
 def test_the_latest_attempt_takes_its_campaign_and_versions_from_the_clients_log_and_the_running_version_from_the_card():
     out = attempt(attempt_row())
     assert out == {"title": "Latest OTA attempt · Campaign #3901", "attempted": "3.7.0", "rollback": "3.4.0",
-                   "running": "3.4.0",
+                   "running": "3.4.0", "active": False,
                    "note": {"text": "Update to 3.7.0 did not pass its checks. The device rolled back to 3.4.0.", "cls": "warn"}}
     other = attempt(attempt_row(campaign="#77", version="9.9", rollback="8.8"), running="8.8")
     assert (other["title"], other["attempted"], other["rollback"], other["running"]) == (
@@ -620,32 +621,70 @@ DEMO_DOM = FAKE_DOM.replace("require(process.argv[1]);", "require(process.argv[1
 assert DEMO_DOM != FAKE_DOM
 
 
+# What the page holds after a render, for the tests to read.
+DUMP = """
+  const g = id => document.getElementById(id);
+  const flat = n => n.kids ? n.own + n.kids.map(flat).join('') : n.textContent;
+  const withClass = (re, n) => (re.test(n.className || '') ? [n] : []).concat(...(n.kids || []).map(k => withClass(re, k)));
+  const boxes = n => withClass(/\\bdemo-box\\b/, n);
+  const rows = id => boxes(g(id)).map(b => ({
+    k: flat(b.kids[0]), v: flat(b.kids[1]), cls: b.kids[1].className.replace(/^v\\s*/, '').trim(),
+    note: b.kids[2] ? flat(b.kids[2]) : '', wide: / wide/.test(b.className), title: b.title || '' }));
+  const changedBoxes = id => boxes(g(id)).filter(b => /\\bchanged\\b/.test(b.className)).map(b => flat(b.kids[0]));
+  const heads = id => withClass(/\\bdemo-head\\b/, g(id)).map(n => ({ text: flat(n), changed: /\\bchanged\\b/.test(n.className) }));
+  const titles = id => withClass(/\\bdemo-attempt-title\\b/, g(id)).map(flat);
+  const titleActive = id => withClass(/\\bdemo-attempt-title\\b/, g(id)).map(n => /\\bactive\\b/.test(n.className));
+  const notes = id => withClass(/\\bdemo-attempt-note\\b/, g(id)).map(n => ({
+    text: flat(n), cls: n.className.replace(/^demo-attempt-note\\s*/, '').trim() }));
+  const dump = () => ({
+    osTitles: titles('demo-os'), appTitles: titles('demo-app'), osNotes: notes('demo-os'), appNotes: notes('demo-app'),
+    osTitleActive: titleActive('demo-os'), appTitleActive: titleActive('demo-app'),
+    osChanged: changedBoxes('demo-os'), appChanged: changedBoxes('demo-app'), osHeads: heads('demo-os'), appHeads: heads('demo-app'),
+    badge: flat(g('demo-badge')), badgeClass: g('demo-badge').className, sub: flat(g('demo-sub')),
+    bannerHidden: g('demo-banner').hidden, banner: flat(g('demo-banner')),
+    mainHidden: g('demo-main').hidden, mainClass: g('demo-main').className,
+    os: flat(g('demo-os')), app: flat(g('demo-app')), esync: flat(g('demo-esync')),
+    osRows: rows('demo-os'), appRows: rows('demo-app'), esyncRows: rows('demo-esync'),
+    pkgsHidden: g('demo-pkgs-card').hidden, pkgs: flat(g('demo-pkgs')), pkgRows: rows('demo-pkgs'),
+    pkgsCount: flat(g('demo-pkgs-count')), pkgsCountClass: g('demo-pkgs-count').className,
+    pkgsNote: flat(g('demo-pkgs-note')), pkgsHintHidden: g('demo-pkgs-hint').hidden
+  });
+"""
+
+
 def page(answer):
-    return node(DEMO_DOM + """
-      settle().then(() => {
-        const g = id => document.getElementById(id);
-        const flat = n => n.kids ? n.own + n.kids.map(flat).join('') : n.textContent;
-        const boxes = n => (/\\bdemo-box\\b/.test(n.className || '') ? [n] : []).concat(...(n.kids || []).map(boxes));
-        const rows = id => boxes(g(id)).map(b => ({
-          k: flat(b.kids[0]), v: flat(b.kids[1]), cls: b.kids[1].className.replace(/^v\\s*/, '').trim(),
-          note: b.kids[2] ? flat(b.kids[2]) : '', wide: / wide/.test(b.className), title: b.title || '' }));
-        const withClass = (re, n) => (re.test(n.className || '') ? [n] : []).concat(...(n.kids || []).map(k => withClass(re, k)));
-        const titles = id => withClass(/\\bdemo-attempt-title\\b/, g(id)).map(flat);
-        const notes = id => withClass(/\\bdemo-attempt-note\\b/, g(id)).map(n => ({
-          text: flat(n), cls: n.className.replace(/^demo-attempt-note\\s*/, '').trim() }));
-        console.log(JSON.stringify({
-          osTitles: titles('demo-os'), appTitles: titles('demo-app'), osNotes: notes('demo-os'), appNotes: notes('demo-app'),
-          badge: flat(g('demo-badge')), badgeClass: g('demo-badge').className, sub: flat(g('demo-sub')),
-          bannerHidden: g('demo-banner').hidden, banner: flat(g('demo-banner')),
-          mainHidden: g('demo-main').hidden, mainClass: g('demo-main').className,
-          os: flat(g('demo-os')), app: flat(g('demo-app')), esync: flat(g('demo-esync')),
-          osRows: rows('demo-os'), appRows: rows('demo-app'), esyncRows: rows('demo-esync'),
-          pkgsHidden: g('demo-pkgs-card').hidden, pkgs: flat(g('demo-pkgs')), pkgRows: rows('demo-pkgs'),
-          pkgsCount: flat(g('demo-pkgs-count')), pkgsCountClass: g('demo-pkgs-count').className,
-          pkgsNote: flat(g('demo-pkgs-note')), pkgsHintHidden: g('demo-pkgs-hint').hidden
-        }));
-      });
+    return node(DEMO_DOM + DUMP + """
+      settle().then(() => console.log(JSON.stringify(dump())));
     """, OTA_JS, json.dumps(answer), DEMO_JS)
+
+
+# The same page asked again, as it is every few seconds: `answers` are what /api/ota says at each poll, and the
+# result is the page's dump after each one. The fake DOM's timer keeps the poll function (the demo's: it registers
+# last) so the test can call it, and `__step` says which answer the fake fetch returns.
+SEQ_DOM = (DEMO_DOM
+           .replace("globalThis.setInterval = () => 0;", "globalThis.setInterval = f => { globalThis.__poll = f; return 0; };")
+           .replace("const answer = JSON.parse(process.argv[2]);",
+                    "const SEQ = JSON.parse(process.argv[2]); const answer = SEQ[0];")
+           .replace("json: async () => answer", "json: async () => SEQ[globalThis.__step || 0]"))
+assert SEQ_DOM.count("__poll") == 1 and "__step" in SEQ_DOM and "const SEQ" in SEQ_DOM
+
+
+def page_seq(*answers):
+    return node(SEQ_DOM + DUMP + """
+      settle().then(async () => {
+        const steps = [dump()];
+        for (let i = 1; i < SEQ.length; i++) { globalThis.__step = i; await globalThis.__poll(); await settle(); steps.push(dump()); }
+        console.log(JSON.stringify(steps));
+      });
+    """, OTA_JS, json.dumps(list(answers)), DEMO_JS)
+
+
+def later(d, seconds=5, **over):
+    """The same answer, written `seconds` later by the exporter (a new status file), with `over` changed."""
+    out = copy.deepcopy(d)
+    out["generated_at"] = ota.format_time(ota.parse_time(d["generated_at"]) + seconds)
+    out.update(over)
+    return out
 
 
 def by_label(rows):
@@ -655,7 +694,7 @@ def by_label(rows):
 @needs_node
 def test_the_demo_page_shows_the_os_and_the_application_for_a_good_answer():
     out = page(good_view())
-    assert out["badge"].startswith("Live") and out["badgeClass"] == "demo-badge live"
+    assert out["badge"].startswith("Live") and out["badgeClass"] == "demo-badge live beat-a"   # the first status beats
     assert out["sub"] == "Automotive Stream Distribution 10 · Texas Instruments J784S4 EVM"
     assert out["mainHidden"] is False and out["mainClass"] == "demo-main" and out["bannerHidden"] is True
     assert "RHIVOS-OS-AUTOSD" in out["os"] and "4.4.0" in out["os"]
@@ -819,3 +858,112 @@ def test_the_demo_page_writes_hostile_strings_as_text():
     d["os"]["packages"]["shown"][0]["before"] = hostile
     out = page(copy.deepcopy(d))                                # the fake DOM throws if innerHTML is ever assigned
     assert hostile in out["sub"] and hostile in out["os"] and hostile in out["app"] and hostile in out["pkgs"]
+
+
+# ── something is happening: the heartbeat, the pulse and the flash ──
+
+@needs_node
+def test_a_campaign_is_active_only_while_it_is_not_completed_and_the_client_still_logs_it():
+    out = demo_js("D.map(p => X.attempt(p, '', true).active)",
+                  attempt_row(result="NOT-COMPLETED"),
+                  attempt_row(result="NOT-COMPLETED", current=False, seen="27 h ago"),
+                  attempt_row(result="UPDATE-COMPLETED"), attempt_row(result="ROLLBACK-COMPLETED"),
+                  attempt_row(result="SOME-NEW-STATE"), attempt_row(result=""))
+    assert out == [True, False, False, False, False, False]
+
+
+@needs_node
+def test_the_heartbeat_beats_once_for_each_status_the_board_writes():
+    w1, w2 = GEN, "2026-11-12T01:36:45Z"
+    out = demo_js("[X.heartbeat('', d0), X.heartbeat(d0.generated_at, d0), X.heartbeat(d0.generated_at, d1),"
+                  " X.heartbeat('', d2), X.heartbeat('', null), X.heartbeat('', {status: 'ok'})]",
+                  {"status": "ok", "generated_at": w1}, {"status": "ok", "generated_at": w2},
+                  {"status": "stale", "generated_at": w1})
+    assert out == [True, False, True, False, False, False]      # new write: beat; same file again, stale, none: no beat
+
+
+@needs_node
+def test_the_live_badge_beats_for_each_new_status_and_stops_when_the_board_goes_quiet():
+    a = good_view()
+    b = later(a)
+    quiet = later(b, 0, status="stale", age_s=70)               # the board stopped writing: the file stays b's
+    back = later(b, 90)
+    steps = page_seq(a, b, copy.deepcopy(b), quiet, back)
+    classes = [st["badgeClass"] for st in steps]
+    assert classes[0] in ("demo-badge live beat-a", "demo-badge live beat-b")
+    assert classes[1].startswith("demo-badge live beat-") and classes[1] != classes[0]    # a new class restarts the beat
+    assert classes[2] == classes[1]                              # the same status read again: no second beat
+    assert classes[3] == "demo-badge stale"                      # quiet: no beat, no live dot
+    assert classes[4].startswith("demo-badge live beat-")        # and it beats again when the board writes again
+
+
+@needs_node
+def test_nothing_beats_without_an_answer():
+    steps = page_seq({"status": "waiting", "message": "no file yet"})
+    assert steps[0]["badgeClass"] == "demo-badge none"
+
+
+@needs_node
+def test_only_a_campaign_in_progress_pulses_and_a_finished_one_the_client_still_confirms_does_not():
+    out = page(good_view())             # OS campaign 1003 NOT-COMPLETED and logged now; app campaign 1001 ROLLBACK-COMPLETED
+    assert out["osTitleActive"] == [True] and out["appTitleActive"] == [False]
+    assert out["osNotes"][0]["cls"] == "active" and out["appNotes"][0]["cls"] == "warn"
+    old = good_view()
+    old["esync"]["campaigns"][0]["last_seen"] = ota.format_time(ota.parse_time(old["generated_at"]) - 3600)
+    assert page(old)["osTitleActive"] == [False]                 # not logged for an hour: no longer working on it
+
+
+@needs_node
+def test_a_staged_update_pulses_in_its_update_box():
+    d = good_view()
+    d["next_boot"] = {"source": "staged", "version": "4.7.0", "digest": ""}
+    assert by_label(page(d)["osRows"])["Update"]["cls"] == "active"      # the pulse is on every box classed active
+
+
+@needs_node
+def test_a_fact_that_changes_between_two_answers_flashes_and_nothing_flashes_on_load_or_when_nothing_changed():
+    a = good_view()
+    same = later(a)
+    done = later(a, 10)
+    done["esync"]["campaigns"][0]["result"] = "ROLLBACK-COMPLETED"
+    moved = later(done, 10)
+    moved["os"]["booted"]["version"] = "4.5.0"
+    steps = page_seq(a, same, done, moved)
+    for st in steps[:2]:                                         # the first render and an unchanged one
+        assert st["osChanged"] == st["appChanged"] == [] and not any(h["changed"] for h in st["osHeads"] + st["appHeads"])
+        assert all("changed" not in n["cls"] for n in st["osNotes"] + st["appNotes"])
+    assert "changed" in steps[2]["osNotes"][0]["cls"]            # eSync's result moved: the line flashes
+    assert steps[2]["osChanged"] == [] and steps[2]["appChanged"] == []    # the versions did not
+    assert steps[3]["osChanged"] == ["Running now"]              # bootc booted another image
+    assert [h["changed"] for h in steps[3]["osHeads"]] == [True] and not any(h["changed"] for h in steps[3]["appHeads"])
+    assert steps[3]["appChanged"] == []                          # the application card did not change
+
+
+@needs_node
+def test_a_result_line_that_appears_flashes():
+    a = good_view()
+    a["esync"]["campaigns"][1]["result"] = ""                    # the app's campaign: no status line yet
+    b = later(a)
+    b["esync"]["campaigns"][1]["result"] = "UPDATE-COMPLETED"
+    steps = page_seq(a, b)
+    assert steps[0]["appNotes"] == [] and "changed" in steps[1]["appNotes"][0]["cls"]
+
+
+@needs_node
+def test_a_card_that_first_appears_after_no_data_does_not_flash():
+    steps = page_seq({"status": "waiting", "message": "no file yet"}, good_view())
+    assert steps[1]["osChanged"] == steps[1]["appChanged"] == [] and not any(h["changed"] for h in steps[1]["osHeads"])
+
+
+def test_the_motion_is_css_only_stops_for_reduced_motion_and_loops_in_step_with_the_poll():
+    css = read(STATIC, "ota_demo.css")
+    for name in ("demo-beat-a", "demo-beat-b", "demo-pulse", "demo-breathe", "demo-flash"):
+        assert "@keyframes " + name in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    assert "animation: none" in css[css.index("@media (prefers-reduced-motion: reduce)"):]
+    # The page redraws a card at every poll, which restarts a CSS animation: a loop whose period divides the poll
+    # interval starts over exactly where it ends, so the redraw is not seen.
+    poll_s = int(re.search(r"POLL_MS = (\d+)", read(STATIC, "ota.js")).group(1)) / 1000
+    for name in ("demo-pulse", "demo-breathe"):
+        period = float(re.search(r"animation: " + name + r" ([0-9.]+)s", css).group(1))
+        assert abs(poll_s / period - round(poll_s / period)) < 1e-9, name

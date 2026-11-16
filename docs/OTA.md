@@ -42,6 +42,17 @@ each other.
 * **Header:** the OS's name and the board's model (`os.distro`, `board.model`), and a badge: *Live · N s ago* while
   the file is fresh, *Stale · last data N min ago* (amber, the cards dimmed) when it is stale, *No data* otherwise,
   with the reason in a banner.
+* **Something is happening:** three kinds of motion, each driven by what the board reports, not by the page's clock.
+  * *Heartbeat:* the *Live* badge carries a green dot that beats once for each status the board writes (every 5 s
+    on the J7). The beat stops when the board goes quiet (the badge turns *Stale*, no dot) and resumes with the next
+    write, which shows an OS update's reboot as it happens.
+  * *Pulse:* a campaign in progress (eSync's `NOT-COMPLETED` while the client still logs it) and a staged update
+    pulse: a blue dot before the block's title (or the *Update* box's text) and a slow glow on the result line. A
+    finished campaign, which the client keeps confirming until it is stopped on the portal, stays still.
+  * *Flash:* a fact that changed since the last refresh (the running version, a box of the attempt block, the result
+    line) flashes once. Nothing flashes when the page loads.
+  There is no progress bar and no percentage: the board reports a campaign as in progress or finished, so that is all
+  the page shows. With `prefers-reduced-motion` the dots stay and the beat, glow and flash stop.
 * **OS OTA Status:** the OS package (`--os-package`), the running version in large type with its digest, then a box
   each for the kernel (across the card, so its version never wraps) and the `bootc`,
   `ostree` and `podman` versions, highlighted, and each of these in its own box:

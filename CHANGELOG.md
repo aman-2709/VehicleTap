@@ -28,6 +28,17 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
   rollback image's own package database by path, from the deployment bootc names; the path is never written out.
   `os.packages` is an addition to schema 1. [docs/OTA.md](docs/OTA.md).
 
+## 2026-11-16: the demo view shows when something is happening
+
+- **Heartbeat** on the *Live* badge: a dot that beats once for each status the board writes; it stops when the board
+  goes quiet and resumes with the next write.
+- **Pulse** on a campaign in progress (and on a staged update): a dot before the block's title and a slow glow on the
+  result line. A finished campaign the client still confirms does not pulse.
+- **Flash** on any fact that changed since the last refresh (running version, the attempt block's boxes, the result
+  line); nothing flashes on load. All CSS animation, driven by the board's data, with the loops' periods dividing the
+  5 s refresh so the redraw is not seen; `prefers-reduced-motion` stops them. No progress bar: the board reports no
+  percentage. [docs/OTA.md](docs/OTA.md) "The demo view".
+
 ## 2026-11-16: the demo view's cards show the latest OTA attempt
 
 - **Latest OTA attempt · Campaign #N** replaces the *Update*, *Deployed version*, *Rollback version* and *Result*

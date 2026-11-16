@@ -11,6 +11,12 @@
 
   // ── pure helpers ──
 
+  // Whether the board has written a status the page has not shown: the live badge beats once for each. A file read
+  // again, a stale one and no answer are not a write.
+  function heartbeat(lastWrite, data) {
+    return !!(data && data.status === 'ok' && data.generated_at && data.generated_at !== lastWrite);
+  }
+
   // The badge: whether what the page shows is live, and if not, how old it is.
   function freshness(data) {
     const ago = data && typeof data.age_s === 'number' ? O.ago(data.age_s) + ' ago' : '';
@@ -94,14 +100,16 @@
   // what eSync made of it. Every value is the board's: the campaign and the attempted version from the client's
   // log, the rollback version as eSync registered it, `running` from the card. A campaign the client stopped
   // logging says when it was last seen. null when the client's log was not read or holds no campaign for the
-  // package, so the page says nothing rather than "no campaign".
+  // package, so the page says nothing rather than "no campaign". `active` is whether something is happening: the
+  // campaign is not completed and the client is still working on it. A finished campaign the client keeps
+  // confirming is not.
   function attempt(pkg, running, known) {
     const c = pkg && pkg.campaign;
     if (!known || !c) return null;
     const title = ['Latest OTA attempt' + (c.campaign ? ' · Campaign ' + c.campaign : ''),
                    !c.current && c.seen ? 'seen ' + c.seen : ''].filter(Boolean).join(' · ');
     return { title, attempted: c.version || '', rollback: c.rollback || '', running: running || '',
-             note: verdict(c, running || '') };
+             active: c.result === 'NOT-COMPLETED' && !!c.current, note: verdict(c, running || '') };
   }
 
   // The OS's update status from bootc alone: what the next boot starts, when that is a queued rollback or a staged
@@ -205,7 +213,7 @@
     return r.version ? row(v(r.version), false, '', '', r.version) : row('not installed', false, 'dim', '', '');
   }
 
-  window.OtaDemo = { freshness, subtitle, shortVersion, versionFacts, packages, campaignsKnown,
+  window.OtaDemo = { heartbeat, freshness, subtitle, shortVersion, versionFacts, packages, campaignsKnown,
                      attempt, osStatus, recordStatus, buildStatus,
                      serviceText, appServices, esyncFacts, packageView, shownPackage };
 
@@ -215,6 +223,19 @@
 
   const $ = id => document.getElementById(id);
   const el = O.el;
+
+  // The badge's beat: the board's last write the page showed, and which of two identical animations the last beat
+  // used (a new class name restarts a CSS animation; the same one does not).
+  let lastWrite = '', beatFlip = false, beatClass = '';
+
+  // What the cards said at the last render, by key, and at this one. A fact whose text differs from the last render's
+  // (or is new) flashes once; nothing flashes before the page has shown a card.
+  let shown = null, nowShown = {};
+  function mark(node, key, text) {
+    nowShown[key] = text;
+    if (shown && shown[key] !== text) node.className += ' changed';
+    return node;
+  }
 
   function fill(id, ...children) { $(id).replaceChildren(...children); }
 
@@ -271,11 +292,11 @@
     const [kernel, ...tools] = versionFacts(os);
     fill('demo-os',
       ...(pkg ? [el('div', 'demo-pkg', pkg.name)] : []),
-      headline('Running', version || digest, version ? digest : ''),        // an image with no version is named by its digest
+      mark(headline('Running', version || digest, version ? digest : ''), 'os/version', version || digest),   // no version: its digest
       grid(versionBox(kernel, true)),                                       // across the card: a version must not wrap
       gridOf('demo-boxes three', tools.map(f => versionBox(f))),
-      grid(...(status ? [box('Update', status.text, status.cls, '', true)] : [])),
-      ...attemptBlock(attempt(pkg, version, campaignsKnown(data))),
+      grid(...(status ? [mark(box('Update', status.text, status.cls, '', true), 'os/update', status.text)] : [])),
+      ...attemptBlock(attempt(pkg, version, campaignsKnown(data)), 'os'),
       grid(...checks(build, record)),
       ...(note ? [el('p', 'demo-asof', note)] : []));
   }
@@ -285,8 +306,8 @@
     if (!apps.length) parts.push(el('p', 'demo-none', "No application package in eSync's record."));
     const known = campaignsKnown(data);
     apps.forEach(pkg => {
-      parts.push(el('div', 'demo-pkg', pkg.name), headline('Installed', pkg.record),
-                 ...attemptBlock(attempt(pkg, pkg.record, known)));
+      parts.push(el('div', 'demo-pkg', pkg.name), mark(headline('Installed', pkg.record), pkg.name + '/version', pkg.record),
+                 ...attemptBlock(attempt(pkg, pkg.record, known), pkg.name));
     });
     const services = appServices(data);
     if (services.length) parts.push(el('div', 'demo-sub', 'Services'), grid(...services.map(serviceBox)));
@@ -304,15 +325,18 @@
   const serviceBox = s => stateBox(s.name, s.text, s.cls);
 
   // A package's latest campaign (attempt): its title, the three versions side by side, and the one-line result.
-  function attemptBlock(a) {
+  // `scope` names the card, so a fact that changes is told from the same fact of another card. While the campaign is
+  // active the title and the line pulse (ota_demo.css); a fact that changed since the last render flashes.
+  function attemptBlock(a, scope) {
     if (!a) return [];
     const ver = v => (v ? O.versionText(v) : '');
-    const parts = [el('div', 'demo-sub demo-attempt-title', a.title),
+    const rollback = a.rollback ? ver(a.rollback) : 'none registered';
+    const parts = [el('div', 'demo-sub demo-attempt-title' + (a.active ? ' active' : ''), a.title),
                    gridOf('demo-boxes three', [
-                     box('Attempted', ver(a.attempted)),
-                     a.rollback ? box('Rolls back to', ver(a.rollback)) : box('Rolls back to', 'none registered', 'dim'),
-                     box('Running now', ver(a.running))])];
-    if (a.note) parts.push(el('p', 'demo-attempt-note ' + a.note.cls, a.note.text));
+                     mark(box('Attempted', ver(a.attempted)), scope + '/attempted', a.attempted),
+                     mark(a.rollback ? box('Rolls back to', rollback) : box('Rolls back to', rollback, 'dim'), scope + '/rollback', a.rollback),
+                     mark(box('Running now', ver(a.running)), scope + '/running', a.running)])];
+    if (a.note) parts.push(mark(el('p', 'demo-attempt-note ' + a.note.cls, a.note.text), scope + '/note', a.note.cls + a.note.text));
     return parts;
   }
 
@@ -340,8 +364,13 @@
 
   function render(data) {
     const badge = freshness(data);
+    if (heartbeat(lastWrite, data)) {
+      beatFlip = !beatFlip;
+      beatClass = beatFlip ? 'beat-a' : 'beat-b';
+      lastWrite = data.generated_at;
+    }
     $('demo-badge').textContent = badge.text;
-    $('demo-badge').className = 'demo-badge ' + badge.cls;
+    $('demo-badge').className = 'demo-badge ' + badge.cls + (badge.cls === 'live' ? ' ' + beatClass : '');
     const show = !!data && (data.status === 'ok' || data.status === 'stale');
     const b = show ? null : O.banner(data);
     $('demo-banner').hidden = !b;
@@ -349,12 +378,14 @@
     $('demo-main').hidden = !show;
     $('demo-main').className = 'demo-main' + (data && data.status === 'stale' ? ' stale' : '');
     if (!show) return;
+    nowShown = {};
     $('demo-sub').textContent = subtitle(data);
     const p = packages(data);
     renderOs(data, p.os);
     renderApps(data, p.apps);
     renderPackages(data);
     renderEsync(data);
+    shown = nowShown;
   }
 
   O.watch(render);
