@@ -234,18 +234,94 @@ def test_with_no_os_package_named_every_package_is_an_application():
     assert demo_js("X.packages(d0)", None) == {"os": None, "apps": []}
 
 
+def attempt_row(**over):
+    """A package as X.packages builds it, with a campaign the client logged 5 s ago and eSync gave up on."""
+    c = {"campaign": "#3901", "version": "3.7.0", "current": True, "seen": "5 s ago", "rollback": "3.4.0",
+         "result": "ROLLBACK-COMPLETED"}
+    c.update(over)
+    return {"campaign": c}
+
+
+def attempt(pkg, running="3.4.0", known=True):
+    return demo_js("X.attempt(d0, %s, %s)" % (json.dumps(running), json.dumps(known)), pkg)
+
+
 @needs_node
-def test_a_campaign_is_active_only_while_the_client_logs_it():
-    rows = [{"campaign": "#3901", "version": "3.7.0", "current": True, "seen": "30 s ago"},
-            {"campaign": "#3901", "version": "3.7.0", "current": False, "seen": "26 h ago"},
-            {"campaign": "#5", "version": "", "current": False, "seen": ""}]
-    out = demo_js("[...D.map(c => X.campaignStatus({campaign: c}, true)), X.campaignStatus({campaign: null}, true),"
-                  " X.campaignStatus(null, true), X.campaignStatus({campaign: D[0]}, false)]", *rows)
-    assert out[0] == {"text": "Campaign #3901 → 3.7.0 active", "cls": "active", "note": ""}
-    assert out[1] == {"text": "No active campaign", "cls": "idle", "note": "Last campaign #3901 → 3.7.0, seen 26 h ago"}
-    assert out[2] == {"text": "No active campaign", "cls": "idle", "note": "Last campaign #5 → ?"}
-    assert out[3] == out[4] == {"text": "No active campaign", "cls": "idle", "note": ""}
-    assert out[5] is None                                   # the client's log was not read: say nothing
+def test_the_latest_attempt_takes_its_campaign_and_versions_from_the_clients_log_and_the_running_version_from_the_card():
+    out = attempt(attempt_row())
+    assert out == {"title": "Latest OTA attempt · Campaign #3901", "attempted": "3.7.0", "rollback": "3.4.0",
+                   "running": "3.4.0",
+                   "note": {"text": "Update to 3.7.0 did not pass its checks. The device rolled back to 3.4.0.", "cls": "warn"}}
+    other = attempt(attempt_row(campaign="#77", version="9.9", rollback="8.8"), running="8.8")
+    assert (other["title"], other["attempted"], other["rollback"], other["running"]) == (
+        "Latest OTA attempt · Campaign #77", "9.9", "8.8", "8.8")                 # nothing is fixed in the page
+
+
+@needs_node
+def test_a_campaign_the_client_stopped_logging_says_when_it_was_last_seen_in_its_title():
+    out = attempt(attempt_row(current=False, seen="27 h ago"))
+    assert out["title"] == "Latest OTA attempt · Campaign #3901 · seen 27 h ago"
+    assert out["note"]["cls"] == "warn"                          # a finished campaign keeps its result
+
+
+@needs_node
+def test_the_result_note_follows_the_result_eSync_logged():
+    done = attempt(attempt_row(result="UPDATE-COMPLETED"), running="3.7.0")
+    assert done["note"] == {"text": "Updated to 3.7.0.", "cls": "ok"}
+    working = attempt(attempt_row(result="NOT-COMPLETED"), running="3.4.0")
+    assert working["note"] == {"text": "Update to 3.7.0 is in progress.", "cls": "active"}
+    gone = attempt(attempt_row(result="NOT-COMPLETED", current=False, seen="27 h ago"))
+    assert gone["note"] == {"text": "No recent activity for campaign #3901.", "cls": "dim"}   # not "active" any more
+
+
+@needs_node
+def test_a_result_word_we_do_not_know_is_shown_as_eSync_wrote_it():
+    out = attempt(attempt_row(result="SOME-NEW-STATE"))
+    assert out["note"] == {"text": "eSync reports SOME-NEW-STATE.", "cls": "dim"}
+
+
+@needs_node
+def test_a_campaign_without_a_status_line_has_its_versions_and_no_verdict():
+    out = attempt(attempt_row(result=""))
+    assert out["note"] is None and out["attempted"] == "3.7.0" and out["rollback"] == "3.4.0"
+
+
+@needs_node
+def test_a_campaign_with_no_rollback_version_registered_still_has_a_block():
+    done = attempt(attempt_row(rollback="", result="UPDATE-COMPLETED"), running="3.7.0")
+    assert done["rollback"] == "" and done["note"] == {"text": "Updated to 3.7.0.", "cls": "ok"}
+    failed = attempt(attempt_row(rollback="", result="ROLLBACK-COMPLETED"), running="3.4.0")
+    assert failed["rollback"] == ""
+    assert failed["note"] == {"text": "Update to 3.7.0 did not pass its checks. The device runs 3.4.0.", "cls": "warn"}
+    assert "rolled back" not in failed["note"]["text"]           # no rollback was registered: none is claimed
+    unknown = attempt(attempt_row(rollback="", result="ROLLBACK-COMPLETED"), running="")
+    assert unknown["note"]["text"] == "Update to 3.7.0 did not pass its checks."
+
+
+@needs_node
+def test_when_the_device_runs_something_other_than_the_rollback_version_the_note_says_what_it_runs():
+    """OS campaign 3958 on the J7: registered rollback 4.3.0, attempted 4.7.1, the device came back on 4.6.0."""
+    out = attempt(attempt_row(campaign="#3958", version="4.7.1", rollback="4.3.0"), running="4.6.0")
+    assert out["rollback"] == "4.3.0" and out["running"] == "4.6.0"
+    assert out["note"] == {"text": "Update to 4.7.1 did not pass its checks. The device runs 4.6.0.", "cls": "warn"}
+    nothing_read = attempt(attempt_row(), running="")            # the running version is unknown: only the target
+    assert nothing_read["running"] == "" and nothing_read["note"]["text"].endswith("The device rolled back to 3.4.0.")
+
+
+@needs_node
+def test_a_campaign_with_no_version_or_number_is_still_worded_without_blanks():
+    out = attempt(attempt_row(campaign="", version="", result="NOT-COMPLETED"))
+    assert out["title"] == "Latest OTA attempt" and out["attempted"] == ""
+    assert out["note"]["text"] == "The update is in progress."
+    out = attempt(attempt_row(campaign="", version="", result="NOT-COMPLETED", current=False, seen=""))
+    assert out["note"]["text"] == "No recent activity." and out["title"] == "Latest OTA attempt"
+
+
+@needs_node
+def test_there_is_no_block_without_the_clients_log_or_without_a_campaign():
+    assert attempt(attempt_row(), known=False) is None           # the log was not read: say nothing
+    assert attempt({"campaign": None}) is None
+    assert demo_js("[X.attempt(null, '', true), X.attempt(undefined, '', true)]") == [None, None]
 
 
 @needs_node
@@ -256,26 +332,7 @@ def test_campaigns_are_known_only_when_the_exporter_read_the_clients_log():
 
 
 @needs_node
-def test_a_campaigns_outcome_is_the_version_it_deployed_the_rollback_version_and_esyncs_result():
-    def camp(**over):
-        c = {"campaign": "#3901", "version": "3.7.0", "current": True, "seen": "5 s ago", "rollback": "3.4.0",
-             "result": "ROLLBACK-COMPLETED"}
-        c.update(over)
-        return {"campaign": c}
-    out = demo_js("D.map(p => X.outcome(p, true))", camp(), camp(result="UPDATE-COMPLETED"),
-                  camp(result="NOT-COMPLETED", rollback=""), camp(result="SOME-NEW-STATE"),
-                  camp(current=False, seen="27 h ago"), camp(result=""), {"campaign": None}, None)
-    assert out[0] == {"deployed": "3.7.0", "rollback": "3.4.0", "result": {"text": "Rolled back", "cls": "warn", "note": ""}}
-    assert out[1]["result"] == {"text": "Updated", "cls": "ok", "note": ""}
-    assert out[2] == {"deployed": "3.7.0", "rollback": "", "result": {"text": "In progress", "cls": "active", "note": ""}}
-    assert out[3]["result"] == {"text": "SOME-NEW-STATE", "cls": "dim", "note": ""}        # a word we do not know, as is
-    assert out[4]["result"]["note"] == "seen 27 h ago"                         # no longer logged: says how old
-    assert out[5] is None and out[6] is None and out[7] is None                # no status line: no boxes
-    assert demo_js("X.outcome(d0, false)", camp()) is None                     # the client's log was not read
-
-
-@needs_node
-def test_the_board_after_act_1_and_a_failed_os_update_shows_both_outcomes():
+def test_the_board_after_act_1_and_a_failed_os_update_shows_both_attempts():
     """The J7 as it was left on 2026-11-12: app 3.7.0 rolled back to 3.4.0, and OS 4.7.0 (registered no rollback
     version) still not completed while the board runs 4.6.0."""
     d = good_view()
@@ -287,31 +344,94 @@ def test_the_board_after_act_1_and_a_failed_os_update_shows_both_outcomes():
          "rollback_version": "", "result": "NOT-COMPLETED"}]
     out = page(d)
     osr, appr = by_label(out["osRows"]), by_label(out["appRows"])
-    assert (osr["Deployed version"]["v"], osr["Rollback version"]["v"], osr["Rollback version"]["cls"]) == (
-        "4.7.0", "none registered", "dim")
-    assert osr["Result"]["v"] == "In progress"
-    assert (appr["Deployed version"]["v"], appr["Rollback version"]["v"], appr["Result"]["v"]) == (
-        "3.7.0", "3.4.0", "Rolled back")
+    assert out["osTitles"] == ["Latest OTA attempt · Campaign #3904"]
+    assert [(osr[k]["v"], osr[k]["cls"]) for k in ("Attempted", "Rolls back to", "Running now")] == [
+        ("4.7.0", ""), ("none registered", "dim"), ("4.4.0", "")]
+    assert out["osNotes"] == [{"text": "Update to 4.7.0 is in progress.", "cls": "active"}]
+    assert out["appTitles"] == ["Latest OTA attempt · Campaign #3901"]
+    assert [(appr[k]["v"], appr[k]["cls"]) for k in ("Attempted", "Rolls back to", "Running now")] == [
+        ("3.7.0", ""), ("3.4.0", ""), ("3.4.0", "")]
+    assert out["appNotes"] == [{"text": "Update to 3.7.0 did not pass its checks. The device rolled back to 3.4.0.",
+                                "cls": "warn"}]
+    for r in (osr, appr):                                         # the boxes the block replaces
+        assert not {"Update", "Deployed version", "Rollback version", "Result"} & set(r)
 
 
 @needs_node
-def test_what_the_next_boot_starts_outranks_a_campaign_on_the_os_card():
-    active = {"campaign": {"campaign": "#9", "version": "4.7.0", "current": True, "seen": "5 s ago"}}
-    log = {"client_log": "ok"}
-    out = demo_js("[X.osStatus(d0, d2), X.osStatus(d1, d2), X.osStatus({next_boot: {source: 'booted', version: '4.6.0'}, esync: d0.esync}, d2),"
-                  " X.osStatus({next_boot: {source: 'staged', version: '', digest: 'sha256:' + 'ab'.repeat(32)}}, null),"
-                  " X.osStatus({next_boot: {source: 'booted', version: '4.6.0'}, esync: d0.esync}, null),"
-                  " X.osStatus({next_boot: {source: 'booted', version: '4.6.0'}}, d2),"
-                  " X.osStatus({next_boot: {source: 'rollback', version: '4.5.0'}}, d2)]",
-                  {"next_boot": {"source": "rollback", "version": "4.5.0"}, "esync": log},
-                  {"next_boot": {"source": "staged", "version": "4.7.0"}, "esync": log}, active)
-    assert out[0] == {"text": "Rollback queued: a reboot starts 4.5.0", "cls": "warn", "note": "Campaign #9 → 4.7.0 active"}
-    assert out[1] == {"text": "Update staged: a reboot starts 4.7.0", "cls": "active", "note": "Campaign #9 → 4.7.0 active"}
-    assert out[2] == {"text": "Campaign #9 → 4.7.0 active", "cls": "active", "note": ""}
-    assert out[3]["text"] == "Update staged: a reboot starts " + "ab" * 6       # no version: named by its digest
-    assert out[4] is None                                   # no OS package named: no campaign to speak of
-    assert out[5] is None                                   # no client log read: likewise
-    assert out[6] == {"text": "Rollback queued: a reboot starts 4.5.0", "cls": "warn", "note": ""}   # bootc alone
+def test_a_finished_campaign_the_client_keeps_confirming_is_not_called_active():
+    """Campaign #3958 → 4.7.1 was rolled back, yet the client logs it every 30 s until it is stopped on the portal."""
+    d = good_view()
+    d["os"]["booted"]["version"] = "4.6.0"
+    d["next_boot"] = {"source": "booted", "version": "4.6.0", "digest": ""}
+    d["esync"]["campaigns"] = [{"package": "RHIVOS-OS-AUTOSD", "version": "4.7.1", "campaign": 3958,
+                                "last_seen": d["generated_at"], "rollback_version": "4.3.0",
+                                "result": "ROLLBACK-COMPLETED"}]
+    out = page(d)
+    assert "active" not in out["os"].lower()
+    assert out["osNotes"] == [{"text": "Update to 4.7.1 did not pass its checks. The device runs 4.6.0.", "cls": "warn"}]
+
+
+@needs_node
+def test_a_campaign_that_completed_with_no_rollback_registered_reads_updated():
+    d = good_view()
+    d["esync"]["campaigns"] = [{"package": "RHIVOS-APP-CANDUMP", "version": "3.7.0", "campaign": 3956,
+                                "last_seen": d["generated_at"], "rollback_version": "", "result": "UPDATE-COMPLETED"}]
+    d["components"][0]["version"] = "3.7.0"
+    out = page(d)
+    appr = by_label(out["appRows"])
+    assert (appr["Rolls back to"]["v"], appr["Rolls back to"]["cls"]) == ("none registered", "dim")
+    assert out["appNotes"] == [{"text": "Updated to 3.7.0.", "cls": "ok"}]
+
+
+@needs_node
+def test_a_campaign_with_no_status_line_yet_shows_its_boxes_and_no_note():
+    d = good_view()
+    d["esync"]["campaigns"] = [{"package": "RHIVOS-APP-CANDUMP", "version": "3.7.0", "campaign": 3901,
+                                "last_seen": d["generated_at"], "rollback_version": "", "result": ""}]
+    out = page(d)
+    assert out["appTitles"] == ["Latest OTA attempt · Campaign #3901"] and out["appNotes"] == []
+    assert by_label(out["appRows"])["Attempted"]["v"] == "3.7.0"
+
+
+@needs_node
+def test_with_no_os_package_named_the_os_card_is_bootc_alone():
+    d = good_view()
+    d["esync"]["os_package"] = ""
+    out = page(d)
+    assert out["osTitles"] == [] and out["osNotes"] == []
+    assert not {"Attempted", "Rolls back to", "Running now"} & set(by_label(out["osRows"]))
+
+
+@needs_node
+def test_the_os_card_runs_what_bootc_booted_and_an_app_card_what_esyncs_record_says():
+    d = good_view()
+    d["os"]["booted"]["version"] = "4.6.0"
+    d["components"][0]["version"] = "3.1.0"
+    out = page(d)
+    assert by_label(out["osRows"])["Running now"]["v"] == "4.6.0"
+    assert by_label(out["appRows"])["Running now"]["v"] == "3.1.0"
+
+
+@needs_node
+def test_a_package_that_never_had_a_campaign_gets_no_block():
+    d = good_view()
+    d["esync"]["campaigns"] = [c for c in d["esync"]["campaigns"] if c["package"] != "RHIVOS-APP-CANDUMP"]
+    out = page(d)
+    assert out["appTitles"] == [] and "Attempted" not in by_label(out["appRows"])
+    assert out["osTitles"] == ["Latest OTA attempt · Campaign #1003"]
+
+
+@needs_node
+def test_what_the_next_boot_starts_is_said_from_bootc_alone_on_the_os_card():
+    out = demo_js("D.map(X.osStatus)",
+                  {"next_boot": {"source": "rollback", "version": "4.5.0"}},
+                  {"next_boot": {"source": "staged", "version": "4.7.0"}},
+                  {"next_boot": {"source": "staged", "version": "", "digest": "sha256:" + "ab" * 32}})
+    assert out[0] == {"text": "Rollback queued: a reboot starts 4.5.0", "cls": "warn"}
+    assert out[1] == {"text": "Update staged: a reboot starts 4.7.0", "cls": "active"}
+    assert out[2]["text"] == "Update staged: a reboot starts " + "ab" * 6       # no version: named by its digest
+    none = demo_js("[X.osStatus({next_boot: {source: 'booted', version: '4.6.0'}}), X.osStatus({}), X.osStatus(null)]")
+    assert none == [None, None, None]
 
 
 @needs_node
@@ -509,7 +629,12 @@ def page(answer):
         const rows = id => boxes(g(id)).map(b => ({
           k: flat(b.kids[0]), v: flat(b.kids[1]), cls: b.kids[1].className.replace(/^v\\s*/, '').trim(),
           note: b.kids[2] ? flat(b.kids[2]) : '', wide: / wide/.test(b.className), title: b.title || '' }));
+        const withClass = (re, n) => (re.test(n.className || '') ? [n] : []).concat(...(n.kids || []).map(k => withClass(re, k)));
+        const titles = id => withClass(/\\bdemo-attempt-title\\b/, g(id)).map(flat);
+        const notes = id => withClass(/\\bdemo-attempt-note\\b/, g(id)).map(n => ({
+          text: flat(n), cls: n.className.replace(/^demo-attempt-note\\s*/, '').trim() }));
         console.log(JSON.stringify({
+          osTitles: titles('demo-os'), appTitles: titles('demo-app'), osNotes: notes('demo-os'), appNotes: notes('demo-app'),
           badge: flat(g('demo-badge')), badgeClass: g('demo-badge').className, sub: flat(g('demo-sub')),
           bannerHidden: g('demo-banner').hidden, banner: flat(g('demo-banner')),
           mainHidden: g('demo-main').hidden, mainClass: g('demo-main').className,
@@ -540,26 +665,29 @@ def test_the_demo_page_shows_the_os_and_the_application_for_a_good_answer():
     assert osr["Update"]["v"] == "Rollback queued: a reboot starts 4.5.0" and osr["Update"]["cls"] == "warn"
     assert osr["Build check"] == {"k": "Build check", "v": "as built for 4.4.0", "cls": "ok", "note": "", "wide": True,
                                   "title": ""}
-    assert osr["Update"]["wide"] is True and osr["Update"]["note"] == "Campaign #1003 → 4.5.0 active"
+    assert osr["Update"]["wide"] is True and osr["Update"]["note"] == ""         # bootc's word alone: no campaign text
     assert [(r["k"], r["v"]) for r in out["osRows"]][:4] == [                    # right under the running version
         ("Kernel Version", "6.12.0-251"), ("bootc Version", "1.16.6"), ("OSTree Version", "2026.1"),
         ("Podman Version", "6.0.2")]
     assert osr["Kernel Version"]["title"] == "6.12.0-251.el10iv.aarch64"           # the full release on hover
     assert osr["bootc Version"]["title"] == ""
-    assert [r["k"] for r in out["osRows"]][4:] == ["Update", "Deployed version", "Rollback version", "Result", "Build check"]
-    assert [(osr[k]["v"], osr[k]["cls"]) for k in ("Deployed version", "Rollback version", "Result")] == [
-        ("4.5.0", ""), ("4.4.0", ""), ("In progress", "active")]
+    assert [r["k"] for r in out["osRows"]][4:] == ["Update", "Attempted", "Rolls back to", "Running now", "Build check"]
+    assert out["osTitles"] == ["Latest OTA attempt · Campaign #1003"]
+    assert [(osr[k]["v"], osr[k]["cls"]) for k in ("Attempted", "Rolls back to", "Running now")] == [
+        ("4.5.0", ""), ("4.4.0", ""), ("4.4.0", "")]
+    assert out["osNotes"] == [{"text": "Update to 4.5.0 is in progress.", "cls": "active"}]
     assert osr["Kernel Version"]["wide"] is True and not osr["bootc Version"]["wide"]   # a kernel version must not wrap
     assert out["os"].index("Running") < out["os"].index("Kernel Version")
     assert "eSync record" not in osr                       # the fixture's OS record has no version: nothing to compare
     assert "RHIVOS-APP-CANDUMP" in out["app"] and "3.4.0" in out["app"] and "RHIVOS-OS-AUTOSD" not in out["app"]
     services = {r["k"]: (r["v"], r["cls"]) for r in out["appRows"] if r["k"] in ("candump", "cangen", "esync")}
     assert services == {"candump": ("running", "ok"), "cangen": ("running", "ok")}
-    assert [r["k"] for r in out["appRows"]] == ["Update", "Deployed version", "Rollback version", "Result",
-                                                "candump", "cangen"]                                # each in its own box
+    assert [r["k"] for r in out["appRows"]] == ["Attempted", "Rolls back to", "Running now", "candump", "cangen"]                                # each in its own box
     appr = by_label(out["appRows"])
-    assert [(appr[k]["v"], appr[k]["cls"]) for k in ("Deployed version", "Rollback version", "Result")] == [
-        ("3.7.0", ""), ("3.4.0", ""), ("Rolled back", "warn")]
+    assert [(appr[k]["v"], appr[k]["cls"]) for k in ("Attempted", "Rolls back to", "Running now")] == [
+        ("3.7.0", ""), ("3.4.0", ""), ("3.4.0", "")]
+    assert out["appNotes"] == [{"text": "Update to 3.7.0 did not pass its checks. The device rolled back to 3.4.0.",
+                                "cls": "warn"}]
     assert [(r["k"], r["v"], r["cls"]) for r in out["esyncRows"]] == [                 # each agent in its own box
         ("RHIVOS_APP agent", "running", "ok"), ("RHIVOS_OS agent", "running", "ok")]
 
@@ -593,15 +721,14 @@ def test_the_demo_page_shows_a_stale_record_and_a_broken_app_service_as_they_are
 
 
 @needs_node
-def test_an_active_campaign_is_shown_on_its_packages_card():
+def test_a_campaign_in_progress_is_the_only_one_shown_as_active():
     d = good_view()
     d["next_boot"] = {"source": "booted", "version": "4.4.0", "digest": ""}
     d["esync"]["campaigns"] = [{"package": "RHIVOS-APP-CANDUMP", "version": "3.7.0", "campaign": 3901,
-                                "last_seen": d["generated_at"]}]
+                                "last_seen": d["generated_at"], "result": "NOT-COMPLETED"}]
     out = page(d)
-    assert by_label(out["appRows"])["Update"]["v"] == "Campaign #3901 → 3.7.0 active"
-    assert by_label(out["appRows"])["Update"]["cls"] == "active"
-    assert by_label(out["osRows"])["Update"]["v"] == "No active campaign"
+    assert out["appNotes"] == [{"text": "Update to 3.7.0 is in progress.", "cls": "active"}]
+    assert out["osNotes"] == [] and "Update" not in by_label(out["osRows"])      # no campaign for the OS: no block
 
 
 @needs_node
@@ -642,7 +769,8 @@ def test_without_the_clients_log_no_card_claims_there_is_no_campaign():
     d["next_boot"] = {"source": "booted", "version": "4.4.0", "digest": ""}
     out = page(d)
     assert "Update" not in by_label(out["osRows"]) and "Update" not in by_label(out["appRows"])
-    assert "Result" not in by_label(out["osRows"]) and "Result" not in by_label(out["appRows"])
+    assert out["osTitles"] == out["appTitles"] == [] and out["osNotes"] == out["appNotes"] == []
+    assert "Attempted" not in by_label(out["osRows"]) and "Attempted" not in by_label(out["appRows"])
     assert "No active campaign" not in out["os"] + out["app"]
 
 

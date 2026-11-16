@@ -28,6 +28,20 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
   rollback image's own package database by path, from the deployment bootc names; the path is never written out.
   `os.packages` is an addition to schema 1. [docs/OTA.md](docs/OTA.md).
 
+## 2026-11-16: the demo view's cards show the latest OTA attempt
+
+- **Latest OTA attempt · Campaign #N** replaces the *Update*, *Deployed version*, *Rollback version* and *Result*
+  boxes on both cards: *Attempted*, *Rolls back to* and *Running now* (bootc's booted version on the OS card, eSync's
+  record on an application's), then one line of eSync's result: *Update to X did not pass its checks. The device
+  rolled back to Y.*, *Updated to X.*, *Update to X is in progress.*, or *No recent activity for campaign #N.* A
+  campaign with no rollback version registered shows *none registered* and never mentions a rollback. The old
+  *Campaign #N → X active* text is gone: the client keeps confirming a finished campaign every 30 s, and a
+  rolled-back campaign read *active* beside *Rolled back*. Only a campaign in progress is called active.
+- Every value comes from the board (the client log, bootc, eSync's record); the page holds no version, campaign
+  number or package name. The *Update* box remains on the OS card for what bootc says the next boot starts (a queued
+  rollback or a staged update).
+  [docs/OTA.md](docs/OTA.md) "The demo view".
+
 ## 2026-11-12: a demo view of the OTA status, /ota/demo
 
 - **`/ota/demo`** shows the same `/api/ota` answer for an audience: an *OS OTA Status* card (the running version in

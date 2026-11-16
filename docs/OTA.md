@@ -45,20 +45,29 @@ each other.
 * **OS OTA Status:** the OS package (`--os-package`), the running version in large type with its digest, then a box
   each for the kernel (across the card, so its version never wraps) and the `bootc`,
   `ostree` and `podman` versions, highlighted, and each of these in its own box:
-  * *Update*: a queued rollback (*Rollback queued: a reboot starts 4.5.0*), else a staged update, else the OS
-    package's campaign if the client logged it in the last two minutes, else *No active campaign*, with the last
-    campaign and its age under it. A campaign needs `--os-package` and the client's log (`client_log: ok`); without
-    them the box shows only what bootc says, or is left out, and never claims there is no campaign.
-  * *Deployed version*, *Rollback version* and *Result* of the OS package's last campaign, when the client logged a
-    status line for it: the version it deployed, the version eSync rolls back to if that fails (*none registered*
-    when the package named none), and eSync's result (*Updated*, *Rolled back*, *In progress*, or its own word for
-    anything else), with when it was last seen once the client stopped logging it.
+  * *Update*: what the next boot starts, when that is a queued rollback (*Rollback queued: a reboot starts 4.5.0*)
+    or a staged update. bootc says it; no campaign is involved, and the box is left out when the next boot is the
+    running image.
+  * *Latest OTA attempt · Campaign #N*: the OS package's most recent campaign, in three boxes and a line. *Attempted*
+    is the version the campaign deployed, *Rolls back to* the version eSync registered as its rollback target
+    (*none registered* when the package named none), and *Running now* what bootc booted. The line is eSync's
+    result in words: amber *Update to 4.7.1 did not pass its checks. The device rolled back to 4.6.0.* (when the
+    device runs something other than the registered target the line says what it runs, and when no rollback was
+    registered it never mentions one), green *Updated to 4.7.1.*, blue *Update to 4.7.1 is in progress.*, or, for a
+    campaign the client no longer logs, dim *No recent activity for campaign #N.* with *seen 27 h ago* in the title.
+    A word eSync logs that the page does not know is shown as *eSync reports …*. Only a campaign in progress that
+    the client is still logging in the last two minutes is called active: the client keeps confirming a finished
+    campaign every 30 s until it is stopped on the portal, and that is not activity. The campaign number and the
+    attempted version come from the client's log, the rollback version from its `registered rollback to …` line,
+    the result from `considered already updated: …`; none is a value in the page. The block needs `--os-package`
+    and the client's log (`client_log: ok`); without them it is left out and the card never claims there is no
+    campaign.
   * *Build check*: the `build_check` above, worst finding first (*as built for 4.6.0*).
   * *eSync record*: eSync's recorded version of the OS package against the running version, amber when they differ
     (*4.7.0 (the board runs 4.6.0)*). That is what the record shows after the platform rolled an update back and the
     agent has not caught up; the box says no more than that, and it is left out when either version is missing.
 * **APP OTA Status:** every other package eSync has a record or a campaign for, with its installed version and the
-  same *Update*, *Deployed version*, *Rollback version* and *Result* boxes, then a box for every service the exporter reports except eSync's own unit, with its state. On
+  same *Latest OTA attempt* block (*Running now* is eSync's record of the package), then a box for every service the exporter reports except eSync's own unit, with its state. On
   the J7 that is `candump` and `cangen`, which ship in the same signed transaction, so a broken `candump` update shows
   red while `cangen` stays green.
 * **OS Packages**, across the page under the two cards, when the exporter read the image's packages (`--show-rpm`).

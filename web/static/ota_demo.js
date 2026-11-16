@@ -66,49 +66,52 @@
     return { os: osName ? pkg(osName) : null, apps: names.filter(n => n !== osName).map(pkg) };
   }
 
-  function campaignNote(c) {
-    if (!c) return '';
-    const what = c.campaign + ' → ' + (c.version || '?');
-    return c.current ? 'Campaign ' + what + ' active' : 'Last campaign ' + what + (c.seen ? ', seen ' + c.seen : '');
-  }
-
   // Whether the answer can say what eSync is working on: only when the exporter read the client's log.
   const campaignsKnown = data => !!(data && data.esync && data.esync.client_log === 'ok');
 
-  // What eSync is doing for a package: a campaign the client is working on now, or none (with the last one);
-  // null when the client's log was not read, so the page says nothing rather than "no campaign".
-  function campaignStatus(pkg, known) {
-    if (!known) return null;
-    const c = pkg && pkg.campaign;
-    if (c && c.current) return { text: campaignNote(c), cls: 'active', note: '' };
-    return { text: 'No active campaign', cls: 'idle', note: campaignNote(c) };
+  // What eSync's result for a campaign means for the device, in a sentence. eSync's words are the client's, logged
+  // after "considered already updated:". `running` is the version the card knows to be running (bootc's for the OS,
+  // eSync's record for an application), '' when it does not know. A rollback is claimed only when one was
+  // registered and the device runs it; otherwise the note says what runs. A word we do not know is shown as is.
+  function verdict(c, running) {
+    const to = c.version ? 'Update to ' + c.version : 'The update';
+    switch (c.result) {
+      case '': return null;                                           // the client has logged no status line yet
+      case 'UPDATE-COMPLETED': return { text: c.version ? 'Updated to ' + c.version + '.' : 'The update completed.', cls: 'ok' };
+      case 'ROLLBACK-COMPLETED': {
+        const failed = to + ' did not pass its checks.';
+        if (running && running !== c.rollback) return { text: failed + ' The device runs ' + running + '.', cls: 'warn' };
+        return { text: c.rollback ? failed + ' The device rolled back to ' + c.rollback + '.' : failed, cls: 'warn' };
+      }
+      case 'NOT-COMPLETED':                                           // only while the client still works on it
+        return c.current ? { text: to + ' is in progress.', cls: 'active' }
+                         : { text: 'No recent activity' + (c.campaign ? ' for campaign ' + c.campaign : '') + '.', cls: 'dim' };
+      default: return { text: 'eSync reports ' + c.result + '.', cls: 'dim' };
+    }
   }
 
-  // eSync's result for a campaign, in the words the client logs after "considered already updated:".
-  const RESULTS = { 'UPDATE-COMPLETED': { text: 'Updated', cls: 'ok' },
-                    'ROLLBACK-COMPLETED': { text: 'Rolled back', cls: 'warn' },
-                    'NOT-COMPLETED': { text: 'In progress', cls: 'active' } };
-
-  // A package's last campaign as three boxes: the version it deployed, the version eSync rolls back to if that fails,
-  // and eSync's result. null when the client's log was not read or holds no status line for the campaign. A campaign
-  // the client stopped logging keeps its boxes, with when it was last seen under the result.
-  function outcome(pkg, known) {
+  // A package's latest campaign: what was attempted, what eSync rolls back to if that fails, what runs now, and
+  // what eSync made of it. Every value is the board's: the campaign and the attempted version from the client's
+  // log, the rollback version as eSync registered it, `running` from the card. A campaign the client stopped
+  // logging says when it was last seen. null when the client's log was not read or holds no campaign for the
+  // package, so the page says nothing rather than "no campaign".
+  function attempt(pkg, running, known) {
     const c = pkg && pkg.campaign;
-    if (!known || !c || !c.result) return null;
-    const r = RESULTS[c.result] || { text: c.result, cls: 'dim' };
-    return { deployed: c.version || '', rollback: c.rollback || '',
-             result: { text: r.text, cls: r.cls, note: c.current || !c.seen ? '' : 'seen ' + c.seen } };
+    if (!known || !c) return null;
+    const title = ['Latest OTA attempt' + (c.campaign ? ' · Campaign ' + c.campaign : ''),
+                   !c.current && c.seen ? 'seen ' + c.seen : ''].filter(Boolean).join(' · ');
+    return { title, attempted: c.version || '', rollback: c.rollback || '', running: running || '',
+             note: verdict(c, running || '') };
   }
 
-  // The OS's update status. What the next boot starts outranks a campaign: a queued rollback, then a staged update.
-  // Those come from bootc and need no eSync; a campaign needs the OS package named and the client's log read.
-  function osStatus(data, pkg) {
+  // The OS's update status from bootc alone: what the next boot starts, when that is a queued rollback or a staged
+  // update. Needs no eSync; null when the next boot is the running image.
+  function osStatus(data) {
     const nb = data && data.next_boot;
     const next = nb && (nb.version || O.short(nb.digest));
-    const note = campaignsKnown(data) ? campaignNote(pkg && pkg.campaign) : '';
-    if (nb && nb.source === 'rollback') return { text: 'Rollback queued: a reboot starts ' + next, cls: 'warn', note };
-    if (nb && nb.source === 'staged') return { text: 'Update staged: a reboot starts ' + next, cls: 'active', note };
-    return pkg ? campaignStatus(pkg, campaignsKnown(data)) : null;
+    if (nb && nb.source === 'rollback') return { text: 'Rollback queued: a reboot starts ' + next, cls: 'warn' };
+    if (nb && nb.source === 'staged') return { text: 'Update staged: a reboot starts ' + next, cls: 'active' };
+    return null;
   }
 
   // eSync's record of the OS package against the image bootc says is running; null when there is nothing to compare.
@@ -202,8 +205,8 @@
     return r.version ? row(v(r.version), false, '', '', r.version) : row('not installed', false, 'dim', '', '');
   }
 
-  window.OtaDemo = { freshness, subtitle, shortVersion, versionFacts, packages, campaignsKnown, campaignNote,
-                     campaignStatus, outcome, osStatus, recordStatus, buildStatus,
+  window.OtaDemo = { freshness, subtitle, shortVersion, versionFacts, packages, campaignsKnown,
+                     attempt, osStatus, recordStatus, buildStatus,
                      serviceText, appServices, esyncFacts, packageView, shownPackage };
 
   // ── the page ──
@@ -259,7 +262,7 @@
 
   function renderOs(data, pkg) {
     const os = data.os || {};
-    const status = osStatus(data, pkg);
+    const status = osStatus(data);
     const build = buildStatus(os, data.build_check);
     const record = recordStatus(os, pkg);
     const note = O.osDataNote(data);
@@ -271,8 +274,8 @@
       headline('Running', version || digest, version ? digest : ''),        // an image with no version is named by its digest
       grid(versionBox(kernel, true)),                                       // across the card: a version must not wrap
       gridOf('demo-boxes three', tools.map(f => versionBox(f))),
-      grid(...(status ? [box('Update', status.text, status.cls, status.note, true)] : [])),
-      ...outcomeBoxes(outcome(pkg, campaignsKnown(data))),
+      grid(...(status ? [box('Update', status.text, status.cls, '', true)] : [])),
+      ...attemptBlock(attempt(pkg, version, campaignsKnown(data))),
       grid(...checks(build, record)),
       ...(note ? [el('p', 'demo-asof', note)] : []));
   }
@@ -282,10 +285,8 @@
     if (!apps.length) parts.push(el('p', 'demo-none', "No application package in eSync's record."));
     const known = campaignsKnown(data);
     apps.forEach(pkg => {
-      const status = campaignStatus(pkg, known);
       parts.push(el('div', 'demo-pkg', pkg.name), headline('Installed', pkg.record),
-                 ...(status ? [grid(box('Update', status.text, status.cls, status.note, true))] : []),
-                 ...outcomeBoxes(outcome(pkg, known)));
+                 ...attemptBlock(attempt(pkg, pkg.record, known)));
     });
     const services = appServices(data);
     if (services.length) parts.push(el('div', 'demo-sub', 'Services'), grid(...services.map(serviceBox)));
@@ -302,13 +303,17 @@
 
   const serviceBox = s => stateBox(s.name, s.text, s.cls);
 
-  // The outcome boxes of a package's last campaign, or nothing.
-  function outcomeBoxes(o) {
-    if (!o) return [];
-    return [gridOf('demo-boxes three', [
-      box('Deployed version', o.deployed ? O.versionText(o.deployed) : ''),
-      o.rollback ? box('Rollback version', O.versionText(o.rollback)) : box('Rollback version', 'none registered', 'dim'),
-      box('Result', o.result.text, o.result.cls, o.result.note)])];
+  // A package's latest campaign (attempt): its title, the three versions side by side, and the one-line result.
+  function attemptBlock(a) {
+    if (!a) return [];
+    const ver = v => (v ? O.versionText(v) : '');
+    const parts = [el('div', 'demo-sub demo-attempt-title', a.title),
+                   gridOf('demo-boxes three', [
+                     box('Attempted', ver(a.attempted)),
+                     a.rollback ? box('Rolls back to', ver(a.rollback)) : box('Rolls back to', 'none registered', 'dim'),
+                     box('Running now', ver(a.running))])];
+    if (a.note) parts.push(el('p', 'demo-attempt-note ' + a.note.cls, a.note.text));
+    return parts;
   }
 
   function renderEsync(data) {
