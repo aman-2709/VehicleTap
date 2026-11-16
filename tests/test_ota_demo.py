@@ -88,6 +88,40 @@ def test_the_three_tools_share_a_row_and_stack_on_a_small_phone():
     assert ".demo-boxes.three" in narrow and "minmax(0, 1fr)" in narrow
 
 
+def test_the_os_packages_card_is_hidden_until_the_board_reports_its_packages(api):
+    html = api[0].get("/ota/demo").get_data(as_text=True)
+    card = html[html.index('id="demo-pkgs-card"'):].split(">")[0]
+    assert "hidden" in card and "demo-wide" in html[html.rindex("<section", 0, html.index('id="demo-pkgs-card"')):]
+    assert html.index("APP OTA Status") < html.index("OS Packages") < html.index(">eSync<")
+
+
+def test_the_os_packages_card_starts_folded_with_its_title_and_counts_on_the_line_that_opens_it(api):
+    html = api[0].get("/ota/demo").get_data(as_text=True)
+    fold = html[html.index('<details class="demo-fold" id="demo-pkgs-fold"'):html.index("</details>")]
+    assert fold.split(">")[0] == '<details class="demo-fold" id="demo-pkgs-fold"'          # no `open`: folded
+    head = fold[fold.index("<summary>"):fold.index("</summary>")]
+    for part in ("OS Packages", 'id="demo-pkgs-count"', 'id="demo-pkgs-note"', "Show packages", "Hide packages"):
+        assert part in head, part
+    assert 'id="demo-pkgs"' in fold[fold.index("</summary>"):]                    # the boxes are inside the fold
+
+
+def test_only_the_presenter_opens_or_closes_the_fold():
+    """The page redraws every 5 s; it must never touch the fold, or it would close it under the presenter."""
+    src = read(DEMO_JS)
+    assert "demo-pkgs-fold" not in src and ".open" not in src and "'open'" not in src
+
+
+def test_the_shown_packages_take_four_columns_two_on_a_tablet_and_one_on_a_phone():
+    css = read(STATIC, "ota_demo.css")
+    assert ".demo-boxes.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }" in css
+    assert "@media (max-width: 800px) { .demo-boxes.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }" in css
+    narrow = css[css.index("@media (max-width: 420px)"):].split("\n")[0]
+    assert ".demo-boxes.four" in narrow
+    assert ".demo-card[hidden] { display: none; }" in css
+    assert ".demo-fold:not([open]) .when-open, .demo-fold[open] .when-closed { display: none; }" in css
+    assert ".demo-fold-hint[hidden] { display: none; }" in css
+
+
 def test_the_cards_sit_side_by_side_and_stack_on_a_phone():
     css = read(STATIC, "ota_demo.css")
     assert "repeat(2, minmax(0, 1fr))" in css[css.index(".demo-main {"):].split("}")[0]
@@ -143,11 +177,38 @@ def test_the_os_card_has_a_box_for_the_kernel_and_each_tool():
     out = demo_js("D.map(X.versionFacts)",
                   {"kernel": "6.12.0-281.el10iv.aarch64", "tools": {"bootc": "1.17.1", "ostree": "2026.4", "podman": "6.1.0"}},
                   {"kernel": "", "tools": {"bootc": "1.17.1", "ostree": "", "podman": ""}}, None)
-    assert out[0] == [{"label": "Kernel Version", "value": "6.12.0-281.el10iv.aarch64"},
-                      {"label": "bootc Version", "value": "1.17.1"}, {"label": "OSTree Version", "value": "2026.4"},
-                      {"label": "Podman Version", "value": "6.1.0"}]
-    assert [f["value"] for f in out[1]] == ["", "1.17.1", "", ""]
+    assert out[0] == [{"label": "Kernel Version", "value": "6.12.0-281", "title": "6.12.0-281.el10iv.aarch64"},
+                      {"label": "bootc Version", "value": "1.17.1", "title": ""},
+                      {"label": "OSTree Version", "value": "2026.4", "title": ""},
+                      {"label": "Podman Version", "value": "6.1.0", "title": ""}]
+    assert [f["value"] for f in out[1]] == ["", "1.17.1", "", ""] and out[1][0]["title"] == ""
     assert [f["value"] for f in out[2]] == ["", "", "", ""]
+
+
+# What the J7's images carry (tests/fixtures/ota/rpm_qa_*.txt, `uname -r`), and the forms around them.
+SHORT_VERSIONS = [
+    ("6.12.0-281.el10iv.aarch64", "6.12.0-281"),               # uname -r: the tag and the architecture go
+    ("6.12.0-281.el10iv.x86_64", "6.12.0-281"),
+    ("6.12.0-281.el10iv.aarch64+debug", "6.12.0-281+debug"),   # a kernel variant stays
+    ("6.12.0-281.el10iv", "6.12.0-281"),                       # the kernel-automotive package
+    ("3.5.9-1.el10", "3.5.9-1"),
+    ("20260811-1.git4dcd294.el10", "20260811-1.git4dcd294"),   # crypto-policies: a git snapshot stays
+    ("2026.2.92_v9.0.319-100.3.el10", "2026.2.92_v9.0.319-100.3"),
+    ("10.44-1.el10.3", "10.44-1.3"),                           # pcre2 in 4.3.0: the tag inside the release
+    ("10.44-1.4.el10", "10.44-1.4"),                           # and in 4.6.0
+    ("3.el10_0.2", "3.2"), ("1.2-3.el10_1", "1.2-3"),          # a z-stream tag
+    ("6.12.0-251.el10iv, 6.12.0-281.el10iv", "6.12.0-251, 6.12.0-281"),   # two installed: each
+    ("1.17.1", "1.17.1"), ("9.9p1-34", "9.9p1-34"),            # nothing to take out
+    ("5.6-el10", "5.6-el10"), ("1.0-2.elx", "1.0-2.elx"), ("2.el10-1", "2.el10-1"),   # not a tag where it sits
+    ("", ""),
+]
+
+
+@needs_node
+def test_a_version_on_the_demo_view_leaves_out_the_build_tag_and_the_architecture():
+    out = demo_js("D[0].map(X.shortVersion)", [v for v, _ in SHORT_VERSIONS])
+    assert out == [short for _, short in SHORT_VERSIONS]
+    assert demo_js("[null, undefined, 3, {}].map(X.shortVersion)") == ["", "", "", ""]
 
 
 @needs_node
@@ -305,12 +366,132 @@ def test_the_esync_line_lists_the_agents_else_the_processes():
     assert out[2] == [{"name": "eSync processes", "text": "unknown", "cls": "dim"}]
 
 
+def act2_packages(**over):
+    """The J7 after Act 2 (4.3.0 to 4.6.0), as the exporter reports it with three --show-rpm names."""
+    p = {"total": 255, "compared": True, "updated": 119, "added": 1, "removed": 0,
+         "shown": [{"name": "openssl", "version": "3.5.9-1.el10", "before": "3.5.7-2.el10", "change": "updated"},
+                   {"name": "zstd", "version": "1.5.5-9.el10", "before": "", "change": "added"},
+                   {"name": "bash", "version": "5.2.26-6.el10", "before": "5.2.26-6.el10", "change": "same"}]}
+    p.update(over)
+    return p
+
+
+def act2_os(**packages_over):
+    return {"booted": {"version": "4.6.0"}, "rollback": {"version": "4.3.0"}, "packages": act2_packages(**packages_over)}
+
+
 @needs_node
-def test_the_slots_beside_the_running_image_are_staged_and_rollback():
-    out = demo_js("D.map(X.slots)", {"staged": {"version": "4.7.0"}, "rollback": {"version": "4.5.0"}, "rollback_queued": True},
-                  {"staged": None, "rollback": None}, None)
-    assert out[0] == [{"label": "Staged", "value": "4.7.0"}, {"label": "Rollback (queued)", "value": "4.5.0"}]
-    assert out[1] == out[2] == [{"label": "Staged", "value": ""}, {"label": "Rollback", "value": ""}]
+def test_the_packages_summary_counts_the_changes_since_the_rollback_image():
+    out = demo_js("X.packageView(d0)", act2_os())
+    assert out["summary"] == {"text": "119 updated · 1 added · 0 removed", "cls": "active",
+                              "note": "since 4.3.0 (the rollback image) · 255 packages in 4.6.0"}
+    assert [r["name"] for r in out["rows"]] == ["openssl", "zstd", "bash"]
+
+
+@needs_node
+def test_after_the_reset_back_to_4_3_0_the_summary_counts_the_downgrades():
+    """The reset campaign: 4.3.0 runs and 4.6.0 is the rollback image."""
+    os_ = {"booted": {"version": "4.3.0"}, "rollback": {"version": "4.6.0"},
+           "packages": act2_packages(total=254, updated=0, downgraded=119, added=0, removed=1)}
+    out = demo_js("X.packageView(d0)", os_)
+    assert out["summary"] == {"text": "0 updated · 119 downgraded · 0 added · 1 removed", "cls": "active",
+                              "note": "since 4.6.0 (the rollback image) · 254 packages in 4.3.0"}
+
+
+@needs_node
+def test_no_downgrade_leaves_the_summary_as_it_was():
+    out = demo_js("D.map(X.packageView)", act2_os(downgraded=0), act2_os(downgraded=None))
+    assert [o["summary"]["text"] for o in out] == ["119 updated · 1 added · 0 removed"] * 2
+    out = demo_js("X.packageView(d0)", act2_os(updated=0, downgraded=0, added=0, removed=0))
+    assert out["summary"]["text"] == "No package changed"
+
+
+@needs_node
+def test_an_update_that_changed_no_package_says_so():
+    """Act 3's 4.7.1 is 4.6.0 with one boot check more: the same packages."""
+    out = demo_js("X.packageView(d0)", act2_os(updated=0, added=0, removed=0))
+    assert out["summary"]["text"] == "No package changed" and out["summary"]["cls"] == "dim"
+
+
+@needs_node
+def test_without_a_comparison_the_summary_is_the_count_and_why():
+    with_rollback = act2_os(compared=False, updated=None, added=None, removed=None)
+    without = dict(with_rollback, rollback=None)
+    out = demo_js("D.map(X.packageView)", with_rollback, without)
+    assert out[0]["summary"] == {"text": "255 packages in 4.6.0", "cls": "",
+                                 "note": "The rollback image's packages could not be read"}
+    assert out[1]["summary"]["note"] == "No rollback image to compare with"
+
+
+@needs_node
+def test_a_count_the_answer_does_not_carry_is_left_out_of_the_summary():
+    out = demo_js("X.packageView(d0)", act2_os(added=None, total=None))
+    assert out["summary"]["text"] == "119 updated · 0 removed"
+    assert out["summary"]["note"] == "since 4.3.0 (the rollback image)"
+
+
+@needs_node
+def test_no_packages_in_the_answer_is_no_view():
+    assert demo_js("D.map(X.packageView)", {"booted": {"version": "4.6.0"}, "packages": None}, {}, None) == [None] * 3
+
+
+@needs_node
+def test_each_shown_package_shows_its_version_and_what_it_was():
+    rows = [{"name": "a", "version": "2", "before": "1", "change": "updated"},
+            {"name": "b", "version": "1", "before": "", "change": "added"},
+            {"name": "c", "version": "", "before": "3", "change": "removed"},
+            {"name": "d", "version": "4", "before": "4", "change": "same"},
+            {"name": "e", "version": "5", "before": "", "change": ""},
+            {"name": "f", "version": "", "before": "", "change": ""}]
+    out = demo_js("D[0].map(r => X.shownPackage(r, '4.3.0'))", rows)
+    assert out == [{"name": "a", "value": "2", "accent": True, "cls": "", "note": "was 1", "title": "2, was 1"},
+                   {"name": "b", "value": "1", "accent": True, "cls": "", "note": "new since 4.3.0", "title": "1"},
+                   {"name": "c", "value": "removed", "accent": False, "cls": "warn", "note": "was 3", "title": "was 3"},
+                   {"name": "d", "value": "4", "accent": False, "cls": "dim", "note": "unchanged", "title": "4"},
+                   {"name": "e", "value": "5", "accent": False, "cls": "", "note": "", "title": "5"},
+                   {"name": "f", "value": "not installed", "accent": False, "cls": "dim", "note": "", "title": ""}]
+    assert demo_js("X.shownPackage(d0, '')", rows[1])["note"] == "new"
+
+
+@needs_node
+def test_a_shown_package_leaves_out_the_build_tag_and_keeps_the_rpm_strings_for_the_hover():
+    rows = [{"name": "kernel-automotive", "version": "6.12.0-281.el10iv", "before": "6.12.0-251.el10iv", "change": "updated"},
+            {"name": "can-utils", "version": "2025.01-3.el10iv", "before": "2023.03-3.el10", "change": "updated"},
+            {"name": "zstd", "version": "1.5.5-9.el10", "before": "", "change": "added"},
+            {"name": "gone", "version": "", "before": "2.1-4.el10", "change": "removed"},
+            {"name": "bash", "version": "5.2.26-6.el10", "before": "5.2.26-6.el10", "change": "same"},
+            {"name": "other", "version": "1.0-1.el10", "before": "", "change": ""}]
+    out = demo_js("D[0].map(r => X.shownPackage(r, '4.3.0'))", rows)
+    assert [(r["value"], r["note"], r["title"]) for r in out] == [
+        ("6.12.0-281", "was 6.12.0-251", "6.12.0-281.el10iv, was 6.12.0-251.el10iv"),
+        ("2025.01-3", "was 2023.03-3", "2025.01-3.el10iv, was 2023.03-3.el10"),
+        ("1.5.5-9", "new since 4.3.0", "1.5.5-9.el10"),
+        ("removed", "was 2.1-4", "was 2.1-4.el10"),
+        ("5.2.26-6", "unchanged", "5.2.26-6.el10"),
+        ("1.0-1", "", "1.0-1.el10")]
+
+
+@needs_node
+def test_a_downgraded_package_says_so_with_the_newer_version_it_came_from():
+    rows = [{"name": "kernel-automotive", "version": "6.12.0-251.el10iv", "before": "6.12.0-281.el10iv",
+             "change": "downgraded"},
+            {"name": "x", "version": "1.0-1.el10", "before": "1.0-1.el10iv", "change": "downgraded"}]   # the tag alone
+    out = demo_js("D[0].map(r => X.shownPackage(r, '4.6.0'))", rows)
+    assert out == [{"name": "kernel-automotive", "value": "6.12.0-251", "accent": True, "cls": "",
+                    "note": "downgraded from 6.12.0-281", "title": "6.12.0-251.el10iv, was 6.12.0-281.el10iv"},
+                   {"name": "x", "value": "1.0-1.el10", "accent": True, "cls": "",
+                    "note": "downgraded from 1.0-1.el10iv", "title": "1.0-1.el10, was 1.0-1.el10iv"}]
+
+
+@needs_node
+def test_an_update_that_changed_only_the_build_tag_keeps_the_tags_in_the_box():
+    """The same version rebuilt under another tag: shortened, the box would say "updated" between two equal
+    versions."""
+    rows = [{"name": "can-utils", "version": "2025.01-3.el10iv", "before": "2025.01-3.el10", "change": "updated"},
+            {"name": "tzdata", "version": "2026a-1.el10_1", "before": "2026a-1.el10_0", "change": "updated"}]
+    out = demo_js("D[0].map(r => X.shownPackage(r, '4.3.0'))", rows)
+    assert [(r["value"], r["note"], r["accent"]) for r in out] == [
+        ("2025.01-3.el10iv", "was 2025.01-3.el10", True), ("2026a-1.el10_1", "was 2026a-1.el10_0", True)]
 
 
 # ── the page, rendered against the fake DOM ──
@@ -327,13 +508,16 @@ def page(answer):
         const boxes = n => (/\\bdemo-box\\b/.test(n.className || '') ? [n] : []).concat(...(n.kids || []).map(boxes));
         const rows = id => boxes(g(id)).map(b => ({
           k: flat(b.kids[0]), v: flat(b.kids[1]), cls: b.kids[1].className.replace(/^v\\s*/, '').trim(),
-          note: b.kids[2] ? flat(b.kids[2]) : '', wide: / wide/.test(b.className) }));
+          note: b.kids[2] ? flat(b.kids[2]) : '', wide: / wide/.test(b.className), title: b.title || '' }));
         console.log(JSON.stringify({
           badge: flat(g('demo-badge')), badgeClass: g('demo-badge').className, sub: flat(g('demo-sub')),
           bannerHidden: g('demo-banner').hidden, banner: flat(g('demo-banner')),
           mainHidden: g('demo-main').hidden, mainClass: g('demo-main').className,
           os: flat(g('demo-os')), app: flat(g('demo-app')), esync: flat(g('demo-esync')),
-          osRows: rows('demo-os'), appRows: rows('demo-app'), esyncRows: rows('demo-esync')
+          osRows: rows('demo-os'), appRows: rows('demo-app'), esyncRows: rows('demo-esync'),
+          pkgsHidden: g('demo-pkgs-card').hidden, pkgs: flat(g('demo-pkgs')), pkgRows: rows('demo-pkgs'),
+          pkgsCount: flat(g('demo-pkgs-count')), pkgsCountClass: g('demo-pkgs-count').className,
+          pkgsNote: flat(g('demo-pkgs-note')), pkgsHintHidden: g('demo-pkgs-hint').hidden
         }));
       });
     """, OTA_JS, json.dumps(answer), DEMO_JS)
@@ -349,19 +533,24 @@ def test_the_demo_page_shows_the_os_and_the_application_for_a_good_answer():
     assert out["badge"].startswith("Live") and out["badgeClass"] == "demo-badge live"
     assert out["sub"] == "Automotive Stream Distribution 10 · Texas Instruments J784S4 EVM"
     assert out["mainHidden"] is False and out["mainClass"] == "demo-main" and out["bannerHidden"] is True
-    assert "RHIVOS-OS-AUTOSD" in out["os"] and "4.4.0" in out["os"] and "Rollback (queued)4.5.0" in out["os"]
+    assert "RHIVOS-OS-AUTOSD" in out["os"] and "4.4.0" in out["os"]
+    # No Staged and Rollback boxes: the Update box says what the next boot starts when that matters.
+    assert "Staged" not in out["os"] and "Rollback (queued)" not in out["os"]
     osr = by_label(out["osRows"])
     assert osr["Update"]["v"] == "Rollback queued: a reboot starts 4.5.0" and osr["Update"]["cls"] == "warn"
-    assert osr["Build check"] == {"k": "Build check", "v": "as built for 4.4.0", "cls": "ok", "note": "", "wide": True}
+    assert osr["Build check"] == {"k": "Build check", "v": "as built for 4.4.0", "cls": "ok", "note": "", "wide": True,
+                                  "title": ""}
     assert osr["Update"]["wide"] is True and osr["Update"]["note"] == "Campaign #1003 → 4.5.0 active"
-    assert [(r["k"], r["v"]) for r in out["osRows"]][:4] == [                    # under Staged and Rollback, each in its box
-        ("Kernel Version", "6.12.0-251.el10iv.aarch64"), ("bootc Version", "1.16.6"), ("OSTree Version", "2026.1"),
+    assert [(r["k"], r["v"]) for r in out["osRows"]][:4] == [                    # right under the running version
+        ("Kernel Version", "6.12.0-251"), ("bootc Version", "1.16.6"), ("OSTree Version", "2026.1"),
         ("Podman Version", "6.0.2")]
+    assert osr["Kernel Version"]["title"] == "6.12.0-251.el10iv.aarch64"           # the full release on hover
+    assert osr["bootc Version"]["title"] == ""
     assert [r["k"] for r in out["osRows"]][4:] == ["Update", "Deployed version", "Rollback version", "Result", "Build check"]
     assert [(osr[k]["v"], osr[k]["cls"]) for k in ("Deployed version", "Rollback version", "Result")] == [
         ("4.5.0", ""), ("4.4.0", ""), ("In progress", "active")]
     assert osr["Kernel Version"]["wide"] is True and not osr["bootc Version"]["wide"]   # a kernel version must not wrap
-    assert out["os"].index("Rollback (queued)") < out["os"].index("Kernel Version")
+    assert out["os"].index("Running") < out["os"].index("Kernel Version")
     assert "eSync record" not in osr                       # the fixture's OS record has no version: nothing to compare
     assert "RHIVOS-APP-CANDUMP" in out["app"] and "3.4.0" in out["app"] and "RHIVOS-OS-AUTOSD" not in out["app"]
     services = {r["k"]: (r["v"], r["cls"]) for r in out["appRows"] if r["k"] in ("candump", "cangen", "esync")}
@@ -373,6 +562,17 @@ def test_the_demo_page_shows_the_os_and_the_application_for_a_good_answer():
         ("3.7.0", ""), ("3.4.0", ""), ("Rolled back", "warn")]
     assert [(r["k"], r["v"], r["cls"]) for r in out["esyncRows"]] == [                 # each agent in its own box
         ("RHIVOS_APP agent", "running", "ok"), ("RHIVOS_OS agent", "running", "ok")]
+
+
+@needs_node
+def test_a_staged_update_is_said_in_the_update_box_with_no_slot_boxes():
+    d = good_view()
+    d["os"]["rollback_queued"] = False
+    d["next_boot"] = {"source": "staged", "version": "4.7.0", "digest": ""}
+    out = page(d)
+    osr = by_label(out["osRows"])
+    assert osr["Update"]["v"] == "Update staged: a reboot starts 4.7.0" and osr["Update"]["cls"] == "active"
+    assert "Staged" not in out["os"] and not any(r["k"].startswith(("Staged", "Rollback (")) for r in out["osRows"])
 
 
 @needs_node
@@ -447,6 +647,37 @@ def test_without_the_clients_log_no_card_claims_there_is_no_campaign():
 
 
 @needs_node
+def test_the_os_packages_card_shows_the_act_2_update():
+    d = good_view()
+    d["os"]["booted"]["version"], d["os"]["rollback"]["version"] = "4.6.0", "4.3.0"
+    d["os"]["packages"] = act2_packages()
+    out = page(d)
+    assert out["pkgsHidden"] is False and out["pkgsHintHidden"] is False
+    assert (out["pkgsCount"], out["pkgsCountClass"]) == ("119 updated · 1 added · 0 removed", "demo-fold-count active")
+    assert out["pkgsNote"] == "since 4.3.0 (the rollback image) · 255 packages in 4.6.0"
+    assert [(r["k"], r["v"], r["cls"], r["note"]) for r in out["pkgRows"]] == [          # inside the fold
+        ("openssl", "3.5.9-1", "", "was 3.5.7-2"), ("zstd", "1.5.5-9", "", "new since 4.3.0"),
+        ("bash", "5.2.26-6", "dim", "unchanged")]
+    assert [r["title"] for r in out["pkgRows"]] == [                                  # as rpm writes them, on hover
+        "3.5.9-1.el10, was 3.5.7-2.el10", "1.5.5-9.el10", "5.2.26-6.el10"]
+
+
+@needs_node
+def test_with_no_package_to_show_the_card_is_the_counts_alone_with_nothing_to_open():
+    d = good_view()
+    d["os"]["packages"] = act2_packages(shown=[])
+    out = page(d)
+    assert out["pkgsHidden"] is False and out["pkgsCount"] == "119 updated · 1 added · 0 removed"
+    assert out["pkgsHintHidden"] is True and out["pkgRows"] == []
+
+
+@needs_node
+def test_the_os_packages_card_stays_hidden_when_the_board_did_not_read_its_packages():
+    out = page(good_view())
+    assert out["pkgsHidden"] is True and out["pkgs"] == "" and out["pkgRows"] == []
+
+
+@needs_node
 def test_the_demo_page_writes_hostile_strings_as_text():
     hostile = '<img src=x onerror="alert(1)">'
     d = good_view()
@@ -455,5 +686,8 @@ def test_the_demo_page_writes_hostile_strings_as_text():
     d["os"]["booted"]["version"] = hostile
     d["components"][0]["id"] = hostile
     d["services"][1]["name"] = hostile
+    d["os"]["packages"] = act2_packages()
+    d["os"]["packages"]["shown"][0]["name"] = hostile           # the reader would drop it; the page must not care
+    d["os"]["packages"]["shown"][0]["before"] = hostile
     out = page(copy.deepcopy(d))                                # the fake DOM throws if innerHTML is ever assigned
-    assert hostile in out["sub"] and hostile in out["os"] and hostile in out["app"]
+    assert hostile in out["sub"] and hostile in out["os"] and hostile in out["app"] and hostile in out["pkgs"]

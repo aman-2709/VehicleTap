@@ -21,18 +21,34 @@
     }
   }
 
-  // 'Automotive Stream Distribution 10 · Texas Instruments J784S4 EVM', or as much of it as the board named.
+  // The OS's name and the board's model ('Automotive Stream Distribution 10 · <the model in the board's device
+  // tree>'), or as much of it as the board named.
   function subtitle(data) {
     return [data && data.os && data.os.distro, data && data.board && data.board.model].filter(Boolean).join(' · ');
   }
 
-  // The OS card's version boxes, each in its own box: the running kernel, then the update tools.
+  // A version as the demo view shows it: the upstream version and the build number, without the build's
+  // distribution tag (.el10, .el10iv, .el10_0, wherever it sits in the release) or the architecture the kernel
+  // names itself with (`uname -r`). Every package of an image carries one of a few tags, so they do not say what
+  // changed: 6.12.0-281.el10iv.aarch64 shows as 6.12.0-281. Only those two are taken out; everything else stays,
+  // a kernel variant too (6.12.0-281.el10iv.aarch64+debug shows as 6.12.0-281+debug). Two installed versions
+  // ('a, b') are shortened each. The page keeps the full string for the box's hover, and the answer keeps it.
+  const ARCH = /\.(?:aarch64|x86_64|i686|ppc64le|s390x|riscv64|noarch)(?=\+|$)/;
+  const DIST = /\.el\d+(?:_\d+)*[a-z]*(?=[.+]|$)/g;
+  function shortVersion(v) {
+    if (typeof v !== 'string') return '';
+    return v.split(', ').map(one => one.replace(ARCH, '').replace(DIST, '')).join(', ');
+  }
+
+  // The OS card's version boxes, each in its own box: the running kernel (shortened, its full release on hover),
+  // then the update tools.
   function versionFacts(os) {
     const tools = (os && os.tools) || {};
-    return [{ label: 'Kernel Version', value: (os && os.kernel) || '' },
-            { label: 'bootc Version', value: tools.bootc || '' },
-            { label: 'OSTree Version', value: tools.ostree || '' },
-            { label: 'Podman Version', value: tools.podman || '' }];
+    const kernel = (os && os.kernel) || '';
+    return [{ label: 'Kernel Version', value: shortVersion(kernel), title: kernel },
+            { label: 'bootc Version', value: tools.bootc || '', title: '' },
+            { label: 'OSTree Version', value: tools.ostree || '', title: '' },
+            { label: 'Podman Version', value: tools.podman || '', title: '' }];
   }
 
   // The OS's package and the applications': each with eSync's recorded version and its most recent campaign.
@@ -140,17 +156,55 @@
     return [Object.assign({ name: 'eSync processes' }, O.processFact(e))];
   }
 
-  // The other two image slots beside the running one (the headline): what an update staged, what a rollback would start.
-  function slots(os) {
-    os = os || {};
-    const name = img => (img && (img.version || O.short(img.digest))) || '';
-    return [{ label: 'Staged', value: name(os.staged) },
-            { label: os.rollback_queued ? 'Rollback (queued)' : 'Rollback', value: name(os.rollback) }];
+  // The OS image's packages (the exporter's --show-rpm), against the rollback image: the one-line summary the card
+  // shows folded, then each package the board was asked to show with its version and what it was. null when the
+  // board did not read its packages.
+  function packageView(os) {
+    const p = os && os.packages;
+    if (!p) return null;
+    const running = O.bootedVersion(os);
+    const before = (os.rollback && (os.rollback.version || O.short(os.rollback.digest))) || '';
+    const total = typeof p.total === 'number' ? p.total + ' packages' + (running ? ' in ' + running : '') : '';
+    let summary;
+    if (p.compared) {
+      // Downgrades (the demo's reset to an older image) are named only when there are some, so the update's line
+      // reads as it always did; a file from an exporter that did not count them has none.
+      const counts = [['updated', p.updated], ['downgraded', p.downgraded], ['added', p.added], ['removed', p.removed]]
+        .filter(([word, n]) => typeof n === 'number' && (word !== 'downgraded' || n > 0));
+      const changed = counts.reduce((sum, [, n]) => sum + n, 0);
+      const since = before ? 'since ' + before + ' (the rollback image)' : 'since the rollback image';
+      summary = { text: changed ? counts.map(([word, n]) => n + ' ' + word).join(' · ') : 'No package changed',
+                  cls: changed ? 'active' : 'dim', note: [since, total].filter(Boolean).join(' · ') };
+    } else {
+      summary = { text: total, cls: '',
+                  note: os.rollback ? "The rollback image's packages could not be read" : 'No rollback image to compare with' };
+    }
+    return { summary, rows: (Array.isArray(p.shown) ? p.shown : []).map(r => shownPackage(r, before)) };
   }
 
-  window.OtaDemo = { freshness, subtitle, versionFacts, packages, campaignsKnown, campaignNote, campaignStatus, outcome,
-                     osStatus, recordStatus, buildStatus,
-                     serviceText, appServices, esyncFacts, slots };
+  // One shown package: its version now (`accent` when it changed), under it what it was, both shortened
+  // (shortVersion), and on hover the versions as rpm writes them. A change only in the tag (the same version
+  // rebuilt under another one) keeps the tags: they are what changed.
+  function shownPackage(r, before) {
+    const moved = r.change === 'updated' || r.change === 'downgraded';
+    const tagOnly = moved && shortVersion(r.version) === shortVersion(r.before);
+    const v = s => (tagOnly ? s || '' : shortVersion(s));
+    const was = r.before ? 'was ' + r.before : '';
+    const row = (value, accent, cls, note, title) => ({ name: r.name, value, accent, cls, note, title });
+    switch (r.change) {
+      case 'updated': return row(v(r.version), true, '', 'was ' + v(r.before), [r.version, was].filter(Boolean).join(', '));
+      case 'downgraded': return row(v(r.version), true, '', 'downgraded from ' + v(r.before),
+                                    [r.version, was].filter(Boolean).join(', '));
+      case 'added': return row(v(r.version), true, '', before ? 'new since ' + before : 'new', r.version || '');
+      case 'removed': return row('removed', false, 'warn', 'was ' + v(r.before), was);
+      case 'same': return row(v(r.version), false, 'dim', 'unchanged', r.version || '');
+    }
+    return r.version ? row(v(r.version), false, '', '', r.version) : row('not installed', false, 'dim', '', '');
+  }
+
+  window.OtaDemo = { freshness, subtitle, shortVersion, versionFacts, packages, campaignsKnown, campaignNote,
+                     campaignStatus, outcome, osStatus, recordStatus, buildStatus,
+                     serviceText, appServices, esyncFacts, packageView, shownPackage };
 
   // ── the page ──
 
@@ -169,6 +223,12 @@
     const v = b.appendChild(el('span', 'v ' + (cls || '')));
     if (value instanceof Node) v.appendChild(value); else v.textContent = value || DASH;
     if (note) b.appendChild(el('span', 'note', note));
+    return b;
+  }
+
+  // A box whose value the page shortened carries the full string as its hover text.
+  function titled(b, title) {
+    if (title) b.title = title;
     return b;
   }
 
@@ -199,23 +259,16 @@
 
   function renderOs(data, pkg) {
     const os = data.os || {};
-    const strip = el('div', 'demo-slots');
-    slots(os).forEach(s => {
-      const box = strip.appendChild(el('div', 'demo-slot' + (s.value ? ' on' : '')));
-      box.appendChild(el('span', 'k', s.label));
-      box.appendChild(el('span', 'v', s.value || DASH));
-    });
     const status = osStatus(data, pkg);
     const build = buildStatus(os, data.build_check);
     const record = recordStatus(os, pkg);
     const note = O.osDataNote(data);
     const version = O.bootedVersion(os), digest = O.short(os.booted && os.booted.digest);
-    const versionBox = (f, wide) => box(f.label, f.value ? O.versionText(f.value) : '', '', '', wide);
+    const versionBox = (f, wide) => titled(box(f.label, f.value ? O.versionText(f.value) : '', '', '', wide), f.title);
     const [kernel, ...tools] = versionFacts(os);
     fill('demo-os',
       ...(pkg ? [el('div', 'demo-pkg', pkg.name)] : []),
       headline('Running', version || digest, version ? digest : ''),        // an image with no version is named by its digest
-      strip,
       grid(versionBox(kernel, true)),                                       // across the card: a version must not wrap
       gridOf('demo-boxes three', tools.map(f => versionBox(f))),
       grid(...(status ? [box('Update', status.text, status.cls, status.note, true)] : [])),
@@ -262,6 +315,24 @@
     fill('demo-esync', grid(...esyncFacts(data).map(f => stateBox(f.name, f.text, f.cls))));
   }
 
+  // The OS packages card, hidden when the board did not read its packages. The summary goes on its folded line and
+  // the package boxes inside the fold; whether the fold is open is the presenter's, never set here.
+  function renderPackages(data) {
+    const v = packageView(data.os);
+    $('demo-pkgs-card').hidden = !v;
+    if (!v) {
+      fill('demo-pkgs');
+      return;
+    }
+    const s = v.summary;
+    $('demo-pkgs-count').textContent = s.text || DASH;
+    $('demo-pkgs-count').className = 'demo-fold-count ' + s.cls;
+    $('demo-pkgs-note').textContent = s.note;
+    $('demo-pkgs-hint').hidden = !v.rows.length;                         // nothing to open
+    fill('demo-pkgs', ...(v.rows.length ? [gridOf('demo-boxes four', v.rows.map(r =>
+      titled(box(r.name, r.accent ? O.versionText(r.value) : r.value, r.cls, r.note), r.title)))] : []));
+  }
+
   function render(data) {
     const badge = freshness(data);
     $('demo-badge').textContent = badge.text;
@@ -277,6 +348,7 @@
     const p = packages(data);
     renderOs(data, p.os);
     renderApps(data, p.apps);
+    renderPackages(data);
     renderEsync(data);
   }
 

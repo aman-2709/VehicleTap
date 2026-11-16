@@ -42,8 +42,8 @@ each other.
 * **Header:** the OS's name and the board's model (`os.distro`, `board.model`), and a badge: *Live · N s ago* while
   the file is fresh, *Stale · last data N min ago* (amber, the cards dimmed) when it is stale, *No data* otherwise,
   with the reason in a banner.
-* **OS OTA Status:** the OS package (`--os-package`), the running version in large type with its digest, the staged
-  and rollback slots, then a box each for the kernel (across the card, so its version never wraps) and the `bootc`,
+* **OS OTA Status:** the OS package (`--os-package`), the running version in large type with its digest, then a box
+  each for the kernel (across the card, so its version never wraps) and the `bootc`,
   `ostree` and `podman` versions, highlighted, and each of these in its own box:
   * *Update*: a queued rollback (*Rollback queued: a reboot starts 4.5.0*), else a staged update, else the OS
     package's campaign if the client logged it in the last two minutes, else *No active campaign*, with the last
@@ -61,6 +61,25 @@ each other.
   same *Update*, *Deployed version*, *Rollback version* and *Result* boxes, then a box for every service the exporter reports except eSync's own unit, with its state. On
   the J7 that is `candump` and `cangen`, which ship in the same signed transaction, so a broken `candump` update shows
   red while `cangen` stays green.
+* **OS Packages**, across the page under the two cards, when the exporter read the image's packages (`--show-rpm`).
+  It starts folded to one line: the counts against the rollback image (*119 updated · 1 added · 0 removed*, then
+  *since 4.3.0 (the rollback image) · 255 packages in 4.6.0*; *No package changed* when that is so) and a *Show
+  packages* button. Opened (by a click or the keyboard; a native `<details>`), it shows a box for each `--show-rpm`
+  package with its version: highlighted with *was 3.5.7-2* under it when the update changed it, *new since
+  4.3.0* when it added it, dim and *unchanged* when it did not. The page never opens or closes it, so it stays as the
+  presenter left it through every refresh. Without a rollback image, or when its packages could not be read, the line
+  is the count and says why there is no comparison. After an update back to an older image (the demo's reset) the
+  line names the downgrades too (*0 updated · 119 downgraded · 0 added · 1 removed*) and each box says *downgraded
+  from* the newer version; with none, the line is as above. On the J7 this is what an OS update changed beyond the
+  kernel and the update tools: OpenSSL, OpenSSH, the crypto policy, the CA certificates, the SELinux policy, glibc,
+  systemd and the boot chain.
+* **Versions** on this page are the upstream version and the build number: the build's distribution tag (`.el10`,
+  `.el10iv`, `.el10_0`, wherever it sits in the release) and the architecture in the kernel's own name are left out, so
+  the kernel *6.12.0-281.el10iv.aarch64* shows as *6.12.0-281* and openssl *3.5.9-1.el10* as *3.5.9-1*. Every package
+  in an image carries one of a few tags, so they do not say what an update changed. Anything else stays, a kernel
+  variant too (*6.12.0-281+debug*), and an update that changed only the tag (the same version rebuilt under another
+  one) keeps the tags in its box. Hovering over the kernel box or a package box shows the strings as `uname -r` and
+  `rpm` write them; `/api/ota` and `/ota` keep them whole.
 * **eSync**, across the page under the two cards: a box for each workload agent (`--agent`) with whether it runs, else
   one box for how many of eSync's processes run. The agents are not put on the OTA cards: nothing in the file says
   which package an agent serves.
@@ -94,7 +113,10 @@ A field that does not have its form is blanked (`""` or `null`), never passed th
           "build": {"version": "4.4.0", "built_at": "…Z"},
           "tools": {"bootc": "1.16.6", "ostree": "2026.1", "podman": "6.0.2"},
           "build_records": [ {"version": "4.4.0", "kernel": "…", "bootc": "…", "ostree": "…", "podman": "…"} ],
-          "distro": "Automotive Stream Distribution 10" },
+          "distro": "Automotive Stream Distribution 10",
+          "packages": { "total": 255, "compared": true, "updated": 119, "downgraded": 0, "added": 1, "removed": 0,
+                        "shown": [ {"name": "openssl", "version": "3.5.9-1.el10", "before": "3.5.7-2.el10",
+                                    "change": "updated"} ] } },
   "components": [ {"id": "…", "version": "…", "transaction_digest": "sha256:…", "installed_at": "…Z"} ],
   "services":   [ {"name": "esync", "active_state": "active", "sub_state": "running", "since": "…Z", "restarts": 0} ],
   "esync":      { "unit": "esync", "os_package": "RHIVOS-OS-AUTOSD", "processes": 7, "outside_unit": 0,
@@ -110,7 +132,9 @@ A field that does not have its form is blanked (`""` or `null`), never passed th
   fields added on 2026-11-12 (`interval_s`, `os_interval_s`, `os.as_of`, `os.build`, `os.tools`, `os.build_records`,
   `esync`, then `os.distro`, `board` and `esync.os_package` for the demo view) are additions to schema 1: a reader
   from before them drops them, and this reader shows a file without them as it did before (no build check, an eSync
-  card that says it knows nothing, a demo view with no OS name and every package as an application).
+  card that says it knows nothing, a demo view with no OS name and every package as an application). `os.packages`
+  (2026-11-13) is one more: `null` without `--show-rpm`, and the demo view then has no OS Packages card; its
+  `downgraded` count and change (2026-11-14) are `null` and absent in a file from an exporter before them.
 * `interval_s` and `os_interval_s` are what the exporter was run with (`null` for a one-shot run); `os.as_of` is when
   bootc gave the image data, which the exporter keeps when a later call fails.
 * `os.build` is the image's build stamp (`/etc/build-info`: `IMAGE_VERSION` and `TIMESTAMP`); `os.build_records` is the
@@ -124,6 +148,17 @@ A field that does not have its form is blanked (`""` or `null`), never passed th
   client's latest status line for it, and `""` when the log's tail holds none.
 * `os.distro` is the OS's name from os-release; `board.model` is the board's model from its device tree (a product
   name, not a serial number), `""` on a machine without one.
+* `os.packages` is the OS image's packages (`--show-rpm`): `total` in the running image (rpm's signing keys, which it
+  lists as `gpg-pubkey` packages, not counted), and against the rollback image how many were `updated`,
+  `downgraded`, `added` and `removed`. `updated` and `downgraded` are rpm's own order (epoch, then version, then
+  release, as `rpmvercmp` compares them): a running version rpm puts before the rollback image's is a downgrade, as
+  after the demo's reset to an older image; one rpm orders the same but writes otherwise counts as updated, and a
+  package in several versions is compared by its newest. `compared` is false when there is no rollback image or its
+  packages could not be read; the four counts are then `null`. Each `shown` entry is a `--show-rpm` package: its
+  `version` (VERSION-RELEASE as `rpm -q` writes it, `""` if not installed), its version in the rollback image
+  (`before`), and `change`: `updated`, `downgraded`, `added`, `removed`, `same`, or `""` without a comparison. The
+  epoch only orders versions and is not written, except as `2:1.0-1` when the two versions differ in nothing else. A
+  package installed in several versions has them joined by `, `.
 * An image is `null` unless it has a version or a digest. It carries **no registry name and no transport**: those
   name a server.
 * `active_state` is one of `active inactive failed activating deactivating reloading maintenance`, else `unknown`.
@@ -202,6 +237,8 @@ python3 ota_export.py --out FILE --service esync --interval 30        # keep it 
 | `bootc -V`, `ostree --version`, `podman -v` | the version word of each |
 | `--build-record FILE` | lines of `version kernel bootc ostree podman`, `#` comments; a line that is not five versions is skipped |
 | `/proc/<pid>/cmdline`, then `/proc/<pid>/cgroup` | every command line is read to find the programs under `<esync-home>/bin/` and dropped unless it is one; for those, whether the cgroup is `--esync-unit`'s (or below it), and a workload agent's `-t` topic. No other argument gets out |
+| `rpm -qa --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\n'`, with `--show-rpm` | the running image's packages, name and version only (the epoch to order versions) |
+| the same with `--dbpath /sysroot/ostree/deploy/<stateroot>/deploy/<checksum>.<serial>/usr/lib/sysimage/rpm`, with `--show-rpm` | the rollback image's packages, from that deployment's own database (read-only: `/sysroot` is mounted read-only). The path is built from the stateroot, checksum and serial bootc gives the rollback deployment, each in the one form it has, and none of them is written to the file |
 | the last 1 MiB of `<esync-home>/data/log/esyncclient.log` | lines that start with the client's time and carry `<PACKAGE:VERSION#CAMPAIGN@RECORD>`: the package, version and campaign number, and the line's time. From the campaign's status line (`Package is of version …, needs to be of version …, registered rollback to …, … considered already updated: …`) only the rollback version and the result after *considered already updated*. The rest of each line (and the record number) is never looked at; the log also holds the device's ID and server addresses |
 
 * **It only reads.** The commands it can run are fixed, a `--service` name cannot be an option or a path, and the
@@ -227,6 +264,10 @@ python3 ota_export.py --out FILE --service esync --interval 30        # keep it 
   `--agent TOPIC` once per workload agent the board should run (`/SDK/RHIVOS_APP`, `/SDK/RHIVOS_OS`).
   `--os-package NAME` (`RHIVOS-OS-AUTOSD` on the J7) names the package that updates the OS image; it has no default,
   because a wrong guess would put an application's record next to the OS.
+* **`--show-rpm NAME`**, once per package to show (at most 24), turns on the package comparison. A name is never
+  passed to rpm: both lists are read whole and the names looked up in them. The running image's list is read once,
+  the rollback image's whenever bootc names another rollback deployment, each about half a second on the J7
+  (2026-11-13: 255 packages in 0.47 s, by `rpm -qa` and by `--dbpath`).
 * **Mount the directory, not the file** (`deploy/quadlet/optional/vehicletap.container.d/10-ota.conf` does, and CONTAINER.md
   says how to install it). An atomic replace gives the file a new inode, and a single-file bind mount
   keeps pointing at the old one. Give the container the directory, read-only, and set `VEHICLETAP_OTA_FILE` to the file

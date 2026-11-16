@@ -15,7 +15,7 @@ decodes far more than the OBD-II standard carries — battery state of health,
 **the method used to find all of that is documented in full**, so you can do
 the same on a car nobody has touched yet.
 
-![status](https://img.shields.io/badge/tests-1878%20passing-brightgreen) ![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)
+![status](https://img.shields.io/badge/tests-2083%20passing-brightgreen) ![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)
 
 ## About This Fork
 
@@ -504,7 +504,7 @@ Being on the bus at all has consequences worth knowing:
   **do not operate the laptop while driving.** The dashboard is a passenger's
   tool.
 
-## Status (2026-11-12)
+## Status (2026-11-13)
 
 - **The project is now VehicleTap** (2026-11-03). It is based on Ha-Kake, whose notice asks forks for their own
   name and logo. Nothing you have needs moving: an existing data folder, the old variable names and old replay
@@ -530,6 +530,11 @@ Being on the bus at all has consequences worth knowing:
   version, rollback version and result, the services and the agents, and a Live / Stale badge. Fed from the J7's
   real exporter output during review; packaged for the second J7 with its settings in one file and the rest read
   from the board. [`docs/OTA.md`](docs/OTA.md) "The demo view"
+- **The demo view shows what an OS update changed** (2026-11-13, same branch): with `--show-rpm`, the exporter reads
+  the running image's packages and the rollback image's own package database, and `/ota/demo` shows how many changed
+  (4.3.0 to 4.6.0: 119 updated, 1 added, of 255) and the chosen packages' versions before and after. The reader ran on
+  the J7 (255 packages in about half a second, by `rpm -qa` and by database path); the board had no rollback image
+  then, so the comparison itself is test-verified on the two images' real package lists.
 - Verified on two cars: a 2012 Leaf SL at 35 % SOH (23.2 Ah), and a 2009
   Mitsubishi Lancer ES through the `lancer_2009` profile.
 - **A raw output console, on every car** (2026-09-11): a debug terminal showing

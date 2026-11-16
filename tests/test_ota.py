@@ -218,7 +218,7 @@ def test_keys_that_are_not_in_the_schema_are_dropped_at_every_level(tmp_path):
     assert set(out["services"][0]) == {"name", "active_state", "sub_state", "since", "restarts"}
     assert set(out["health"]) == {"selinux", "ntp_synced", "var_used_pct", "var_free_bytes"}
     assert set(out["os"]) == {"booted", "staged", "rollback", "rollback_queued", "kernel", "booted_at", "as_of", "build",
-                              "tools", "build_records", "distro"}
+                              "tools", "build_records", "distro", "packages"}
     assert set(out["os"]["build"]) == {"version", "built_at"}
     assert set(out["os"]["tools"]) == {"bootc", "ostree", "podman"}
     assert set(out["os"]["build_records"][0]) == {"version", "kernel", "bootc", "ostree", "podman"}
@@ -253,6 +253,71 @@ def test_the_os_name_the_board_model_and_the_os_package_are_kept_as_cleaned_text
     out = ota.clean(d)
     assert "\x00" not in out["os"]["distro"] and "\n" not in out["os"]["distro"] and len(out["os"]["distro"]) <= ota.TEXT_MAX
     assert out["board"]["model"] == "" and out["esync"]["os_package"] == ""
+
+
+def packages(**over):
+    p = {"total": 255, "compared": True, "updated": 119, "downgraded": 0, "added": 1, "removed": 0,
+         "shown": [{"name": "openssl", "version": "3.5.9-1.el10", "before": "3.5.7-2.el10", "change": "updated"},
+                   {"name": "zstd", "version": "1.5.5-9.el10", "before": "", "change": "added"}]}
+    p.update(over)
+    return p
+
+
+def test_the_os_packages_are_kept_with_their_counts_and_each_shown_package():
+    d = good()
+    d["os"]["packages"] = packages()
+    d["os"]["packages"]["list"] = ["openssl-3.5.9"]                      # not in the schema
+    d["os"]["packages"]["shown"][0]["arch"] = "aarch64"
+    out = ota.clean(d)["os"]["packages"]
+    assert out == packages()
+    assert ota.clean(good())["os"]["packages"] is None                   # an exporter run without --show-rpm
+
+
+def test_without_a_comparison_the_package_counts_are_dropped():
+    d = good()
+    d["os"]["packages"] = packages(compared=False)
+    out = ota.clean(d)["os"]["packages"]
+    assert (out["compared"], out["updated"], out["downgraded"], out["added"], out["removed"], out["total"]) == (
+        False, None, None, None, None, 255)
+    d["os"]["packages"] = packages(compared="yes")                        # only a real true compares
+    assert ota.clean(d)["os"]["packages"]["compared"] is False
+
+
+@pytest.mark.parametrize("field,value,want", [
+    ("version", "3.5.9-1.el10", "3.5.9-1.el10"), ("version", "6.12.0-251.el10iv, 6.12.0-281.el10iv", None),
+    ("version", "3.5.9 <b>", ""), ("version", "-rf", ""), ("version", "x" * 81, ""), ("version", 359, ""),
+    ("before", "a\nb", ""), ("name", "libstdc++", "libstdc++"), ("name", "../etc", ""), ("name", "-x", ""),
+    ("name", "a b", ""), ("change", "updated", "updated"), ("change", "UPDATED", ""), ("change", "gone", ""),
+    ("change", None, ""), ("change", "downgraded", "downgraded"),
+    ("before", "2:1.0-1", "2:1.0-1"), ("before", "1:1.0-1, 2:1.0-1", None),     # an epoch-only change keeps the epoch
+    ("before", "12345678901:1.0-1", ""), ("before", ":1.0-1", ""), ("before", "1:", "")])
+def test_a_shown_package_keeps_each_field_only_in_the_form_it_has(field, value, want):
+    d = good()
+    d["os"]["packages"] = packages()
+    d["os"]["packages"]["shown"][0][field] = value
+    shown = ota.clean(d)["os"]["packages"]["shown"]
+    if field == "name" and want == "":
+        assert [s["name"] for s in shown] == ["zstd"]                     # a package with no usable name is dropped
+    else:
+        assert shown[0][field] == (value if want is None else want)
+
+
+@pytest.mark.parametrize("bad", [-1, 100_001, 1.5, True, "119", None])
+def test_a_package_count_out_of_range_is_none(bad):
+    d = good()
+    d["os"]["packages"] = packages(updated=bad, total=bad, downgraded=bad)
+    out = ota.clean(d)["os"]["packages"]
+    assert out["updated"] is None and out["total"] is None and out["downgraded"] is None and out["added"] == 1
+
+
+def test_a_file_from_an_exporter_that_did_not_count_downgrades_has_none():
+    """An exporter before 2026-11-14 wrote no `downgraded`: the page then shows the other counts as before."""
+    d = good()
+    p = packages()
+    del p["downgraded"]
+    d["os"]["packages"] = p
+    out = ota.clean(d)["os"]["packages"]
+    assert out["downgraded"] is None and (out["updated"], out["added"], out["removed"]) == (119, 1, 0)
 
 
 def test_a_string_in_an_image_field_is_cleaned_not_trusted():

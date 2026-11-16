@@ -17,28 +17,34 @@ What it reads, and nothing else:
   /sys/fs/selinux/enforce, uname, statvfs("/var")
   /etc/build-info                       the version and build time the image was stamped with
   /etc/os-release (else /usr/lib/...)   the OS's name ('Automotive Stream Distribution 10')
-  /proc/device-tree/model               the board's model ('Texas Instruments J784S4 EVM'); a PC has none
+  /proc/device-tree/model               the board's model, as its device tree names it; a PC has none
   bootc -V, ostree --version, podman -v the versions of the update tools
   --build-record FILE                   what each OS version was built with (optional)
   /proc/<pid>/cmdline, cgroup           to find the eSync SDK's processes (program under <esync-home>/bin/);
                                         only theirs are kept, and only their agent topic gets out
   <esync-home>/data/log/esyncclient.log the last 1 MiB: the campaigns the eSync client is working on, with each
                                         one's rollback version and result from its status line
+  rpm -qa                               with --show-rpm: the OS image's packages (name, epoch:version-release), and
+  rpm --dbpath <rollback image>/... -qa the rollback image's, from that deployment's own package database
 
-It never changes anything: the commands it may run are the six above and are fixed, a --service name
-cannot be an option or a path, and nothing is written but the output file (a temporary file beside it,
+It never changes anything: the commands it may run are the ones above and are fixed, a --service name
+cannot be an option or a path, the rollback image's database path is built only from what bootc names it by,
+each part in the one form it has, and nothing is written but the output file (a temporary file beside it,
 renamed over it, so a reader never sees half of one).
 
 The document is built from named fields. The `bootc` output also carries the image registry and transport
 and ostree checksums, eSync's state and log carry more than versions (certificate paths, the device's ID,
 server addresses), a process's command line carries key paths: none of that is read out of its input, so it
-cannot be in the output. The dashboard's reader whitelists again on the other side.
+cannot be in the output. (The rollback deployment's stateroot, checksum and serial locate its package database;
+they are not written.) The dashboard's reader whitelists again on the other side.
 
 How often (docs/OTA.md "How often"): with --interval it rewrites the file every --interval seconds, on a
 fixed rate. The cheap sources (files, /proc, systemd) are read on every pass; `bootc status`, the one
 expensive call, every --os-interval seconds, and its last good answer is kept, with the time it was given,
 when a call fails; the build stamp, the OS's name, the board's model, the kernel and the tool versions cannot
-change while the board runs, so they are read once (again only while a tool has not answered).
+change while the board runs, so they are read once (again only while a tool has not answered). With --show-rpm,
+the running image's package list is read once too, and the rollback image's whenever bootc names another
+rollback deployment (each about half a second on an arm64 board).
 
 Usage:
   python3 ota_export.py --out /var/lib/vehicletap-ota/ota_status.json --service esync --service candump
@@ -46,6 +52,7 @@ Usage:
 """
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -77,6 +84,13 @@ OS_INTERVAL = 15
 ACTIVE_STATES = ("active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance")
 TOOLS = ("bootc", "ostree", "podman")
 TOOL_COMMANDS = {"bootc": ["bootc", "-V"], "ostree": ["ostree", "--version"], "podman": ["podman", "-v"]}
+# The OS image's packages (--show-rpm). Another deployment's package database is in its own tree:
+# <DEPLOY_ROOT>/<stateroot>/deploy/<checksum>.<serial>/<DEPLOY_RPMDB>, read-only like the running one's.
+RPM_FORMAT = "%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\n"     # the epoch only orders versions; it is not shown
+RPM_KEYS = ("gpg-pubkey",)                     # rpm lists the signing keys it trusts as packages; they are not
+DEPLOY_ROOT = "/sysroot/ostree/deploy"
+DEPLOY_RPMDB = "usr/lib/sysimage/rpm"
+RPM_SHOWN_MAX = 24
 
 Vfs = namedtuple("Vfs", "f_frsize f_blocks f_bfree f_bavail")
 
@@ -93,6 +107,10 @@ _OS_RELEASE_LINE = re.compile(r"""([A-Z0-9_]+)=(?:"([^"\\`$]*)"|'([^']*)'|([^\s"
 _PACKAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _BUILD_TIME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2}) UTC")
 _OSTREE_VERSION = re.compile(r"^\s*Version:\s*'([^']*)'\s*$", re.M)
+_RPM_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,99}")             # 'openssl', 'libstdc++'
+_RPM_EVR = re.compile(r"[0-9]{1,10}:[0-9A-Za-z][0-9A-Za-z.+~^_-]{0,79}")  # EPOCH:VERSION-RELEASE: '1:3.5.9-1.el10'
+_STATEROOT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_CHECKSUM = re.compile(r"[0-9a-f]{64}")
 # A client-log line about a campaign: "11-12:01:35:59.878 func:file.cpp:313 [main/1] <PACKAGE:VERSION#CAMPAIGN@RECORD> ..."
 # (UTC, no year). Only the time and the token are read; the rest of the line is never looked at ...
 _CAMPAIGN_HEAD = (rb"^([0-9]{2})-([0-9]{2}):([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{1,6} [^<\n]{0,200}"
@@ -163,6 +181,171 @@ def os_section(bootc, kernel, now, boot):
     return {"booted": image(status.get("booted")), "staged": image(status.get("staged")),
             "rollback": image(status.get("rollback")), "rollback_queued": status.get("rollbackQueued") is True,
             "kernel": text(kernel), "booted_at": iso(now - boot)}
+
+
+def rpm_list(raw):
+    """{name: epoch:version} from `rpm -qa --qf RPM_FORMAT` ('openssl': '1:3.5.9-1.el10'), without the signing
+    keys rpm lists as packages; None if `raw` is not text. A name installed in more than one version keeps them
+    all, sorted and joined by ', '. A line that is not a name, a tab and an epoch:version is skipped."""
+    if not isinstance(raw, str):
+        return None
+    found = {}
+    for line in raw.splitlines():
+        name, tab, ver = line.partition("\t")
+        if tab and name not in RPM_KEYS and _RPM_NAME.fullmatch(name) and _RPM_EVR.fullmatch(ver):
+            found.setdefault(name, set()).add(ver)
+    return {name: ", ".join(sorted(vers)) for name, vers in found.items()}
+
+
+_DIGITS = frozenset("0123456789")
+_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def rpmvercmp(a, b):
+    """1, 0 or -1 as version (or release) `a` is newer than, the same as or older than `b`, in rpm's own order
+    (rpmvercmp in rpm's lib/rpmvercmp.c, ported as it is): digit runs compare as numbers and beat letter runs,
+    other characters only separate, '~' sorts before anything (1.0~rc1 < 1.0) and '^' after the end
+    (1.0 < 1.0^git1 < 1.0.1)."""
+    if a == b:
+        return 0
+    i = j = 0
+    while i < len(a) or j < len(b):
+        while i < len(a) and a[i] not in _DIGITS and a[i] not in _LETTERS and a[i] not in "~^":
+            i += 1
+        while j < len(b) and b[j] not in _DIGITS and b[j] not in _LETTERS and b[j] not in "~^":
+            j += 1
+        x, y = a[i:i + 1], b[j:j + 1]                      # '' past the end
+        if x == "~" or y == "~":
+            if x != "~":
+                return 1
+            if y != "~":
+                return -1
+            i, j = i + 1, j + 1
+            continue
+        if x == "^" or y == "^":
+            if not x:
+                return -1
+            if not y:
+                return 1
+            if x != "^":
+                return 1
+            if y != "^":
+                return -1
+            i, j = i + 1, j + 1
+            continue
+        if not (x and y):
+            break
+        kind = _DIGITS if x in _DIGITS else _LETTERS
+        si, sj = i, j
+        while i < len(a) and a[i] in kind:
+            i += 1
+        while j < len(b) and b[j] in kind:
+            j += 1
+        one, two = a[si:i], b[sj:j]
+        if not two:                                        # a number against letters: the number is newer
+            return 1 if kind is _DIGITS else -1
+        if kind is _DIGITS:
+            one, two = one.lstrip("0"), two.lstrip("0")
+            if len(one) != len(two):
+                return 1 if len(one) > len(two) else -1
+        if one != two:
+            return 1 if one > two else -1
+    if i >= len(a) and j >= len(b):
+        return 0
+    return -1 if i >= len(a) else 1
+
+
+def _evr(text):
+    """(epoch, version, release) of 'E:V-R'; an epoch left out is 0 and a release left out is ''."""
+    epoch, colon, vr = text.partition(":")
+    if not colon:
+        epoch, vr = "0", text
+    version, dash, release = vr.rpartition("-")
+    return (int(epoch), version, release) if dash else (int(epoch), vr, "")
+
+
+def evr_compare(a, b):
+    """1, 0 or -1 as 'E:V-R' `a` is newer than, the same as or older than `b`, as rpm orders packages: the epoch,
+    then the version, then the release."""
+    (ea, va, ra), (eb, vb, rb) = _evr(a), _evr(b)
+    if ea != eb:
+        return 1 if ea > eb else -1
+    return rpmvercmp(va, vb) or rpmvercmp(ra, rb)
+
+
+def _newest(versions):
+    """The newest of a package's versions as rpm_list joins them."""
+    return max(versions.split(", "), key=functools.cmp_to_key(evr_compare))
+
+
+def _shown_versions(versions, with_epoch):
+    """A package's versions as `rpm -q` writes them, without the epoch; with it (when not 0) for a package whose
+    versions differ only in the epoch, so that the two do not read the same."""
+    out = []
+    for evr in versions.split(", ") if versions else []:
+        epoch, _, vr = evr.partition(":")
+        out.append(epoch + ":" + vr if with_epoch and epoch != "0" else vr)
+    return ", ".join(out)
+
+
+def deployment_rpmdb(deployment, root=DEPLOY_ROOT):
+    """The package database of one bootc deployment, from the stateroot, checksum and serial bootc names it by;
+    None unless each is in the one form it has, so nothing else can make the path."""
+    tree = deployment.get("ostree") if isinstance(deployment, dict) else None
+    if not isinstance(tree, dict):
+        return None
+    stateroot, checksum, serial = tree.get("stateroot"), tree.get("checksum"), tree.get("deploySerial")
+    if not (isinstance(stateroot, str) and _STATEROOT.fullmatch(stateroot)):
+        return None
+    if not (isinstance(checksum, str) and _CHECKSUM.fullmatch(checksum)):
+        return None
+    if type(serial) is not int or not 0 <= serial <= 1_000_000:
+        return None
+    return f"{root}/{stateroot}/deploy/{checksum}.{serial}/{DEPLOY_RPMDB}"
+
+
+def rollback_rpmdb(bootc):
+    """The rollback image's package database, None if bootc names no rollback deployment."""
+    status = bootc.get("status") if isinstance(bootc, dict) else None
+    return deployment_rpmdb(status.get("rollback")) if isinstance(status, dict) else None
+
+
+def package_change(now, before):
+    """What happened to one package between the rollback image (`before`) and the running one (`now`); each is
+    its versions as rpm_list gives them, '' where it is not installed. A version rpm orders after the one before,
+    or the same but written otherwise ('1.01' and '1.1'), is "updated"; one rpm orders before it is "downgraded"
+    (the demo's reset back to an older OS image). A package in several versions is compared by its newest."""
+    if now and before:
+        if now == before:
+            return "same"
+        return "downgraded" if evr_compare(_newest(now), _newest(before)) < 0 else "updated"
+    if now:
+        return "added"
+    return "removed" if before else ""
+
+
+def packages_section(now, before, shown):
+    """The OS image's packages: how many, how many changed against the rollback image, and each package in `shown`
+    with its version in both. None when the running image's list was not read. Without the rollback image's list
+    (there is none, or it could not be read) `compared` is false, the counts are None and no change is named.
+    Versions are written as `rpm -q` writes them, without the epoch, which only orders them."""
+    if now is None:
+        return None
+    out = {"total": len(now), "compared": before is not None, "updated": None, "downgraded": None, "added": None,
+           "removed": None, "shown": []}
+    if before is not None:
+        changes = [package_change(ver, before.get(name, "")) for name, ver in now.items()]
+        for kind in ("updated", "downgraded", "added"):
+            out[kind] = changes.count(kind)
+        out["removed"] = sum(1 for name in before if name not in now)
+    for name in shown:
+        ver = now.get(name, "")
+        was = before.get(name, "") if before is not None else ""
+        epoch_only = bool(ver and was) and ver != was and _shown_versions(ver, False) == _shown_versions(was, False)
+        out["shown"].append({"name": name, "version": _shown_versions(ver, epoch_only),
+                             "before": _shown_versions(was, epoch_only),
+                             "change": package_change(ver, was) if before is not None else ""})
+    return out
 
 
 def key_values(raw, line):
@@ -396,7 +579,8 @@ def build(src, now, mono, boot):
     bootc_at = src.get("bootc_at", now if isinstance(src.get("bootc"), dict) else None)
     os_.update(as_of=iso(bootc_at) if bootc_at else "", build=build_info(src.get("build_info")),
                tools=tools(src.get("tools")), build_records=build_records(src.get("records")),
-               distro=distro(src.get("os_release")))
+               distro=distro(src.get("os_release")),
+               packages=packages_section(src.get("rpms"), src.get("rpms_before"), src.get("rpm_shown") or ()))
     cfg = src.get("esync_config") or {}
     return {"schema": SCHEMA, "generated_at": iso(now),
             "interval_s": src.get("interval"), "os_interval_s": src.get("os_interval"),
@@ -569,11 +753,23 @@ def collect_bootc(io):
     return answer if isinstance(answer, dict) and isinstance(answer.get("status"), dict) else None
 
 
+def collect_rpms(io, dbpath=None):
+    """rpm's package list of the running image, or with `dbpath` of the deployment whose database that is; None
+    if rpm did not answer."""
+    cmd = ["rpm", *(["--dbpath", dbpath] if dbpath else []), "-qa", "--qf", RPM_FORMAT]
+    return rpm_list(io.run(cmd))
+
+
 def collect(args, io=None):
     """Everything the document is built from, all at once (a one-shot run). `io` supplies the host (this
     module by default; tests pass a fake). A source that cannot be read is None and the rest still comes."""
     io = io or sys.modules[__name__]
-    return {**collect_fast(args, io), **collect_fixed(args, io), "bootc": collect_bootc(io)}
+    src = {**collect_fast(args, io), **collect_fixed(args, io), "bootc": collect_bootc(io)}
+    if args.show_rpm:
+        db = rollback_rpmdb(src["bootc"])
+        src.update(rpms=collect_rpms(io), rpms_before=collect_rpms(io, db) if db else None,
+                   rpm_shown=tuple(args.show_rpm))
+    return src
 
 
 class Collector:
@@ -584,6 +780,7 @@ class Collector:
         self.io = io or sys.modules[__name__]
         self.fixed = None
         self.bootc = self.bootc_at = self.due = None
+        self.rpms = self.rpms_before = self.rpms_before_db = None
 
     def collect(self, now, mono):
         src = collect_fast(self.args, self.io)
@@ -594,9 +791,23 @@ class Collector:
                 self.bootc, self.bootc_at = answer, now
             if self.fixed is None or None in self.fixed["tools"].values():
                 self.fixed = collect_fixed(self.args, self.io)
+            if self.args.show_rpm:
+                self.collect_packages()
         src.update(self.fixed, bootc=self.bootc, bootc_at=self.bootc_at,
                    interval=self.args.interval, os_interval=self.args.os_interval)
+        if self.args.show_rpm:
+            src.update(rpms=self.rpms, rpms_before=self.rpms_before, rpm_shown=tuple(self.args.show_rpm))
         return src
+
+    def collect_packages(self):
+        """The running image's package list once (again while rpm has not answered); the rollback image's when
+        bootc names another rollback deployment, and again while it could not be read."""
+        if self.rpms is None:
+            self.rpms = collect_rpms(self.io)
+        db = rollback_rpmdb(self.bootc)
+        if db != self.rpms_before_db or (db and self.rpms_before is None):
+            self.rpms_before = collect_rpms(self.io, db) if db else None
+            self.rpms_before_db = db
 
     def document(self, wall=time.time, mono=time.monotonic, boot=lambda: time.clock_gettime(time.CLOCK_BOOTTIME)):
         src = self.collect(wall(), mono())
@@ -646,6 +857,13 @@ def package(value):
     return value
 
 
+def rpm_name(value):
+    """A package name. It is never passed to a command: the lists are read whole and the name looked up in them."""
+    if not _RPM_NAME.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a package name like openssl")
+    return value
+
+
 def directory(value):
     if not os.path.isabs(value) or os.path.normpath(value) != value.rstrip("/") or value == "/":
         raise argparse.ArgumentTypeError(f"{value!r} is not an absolute directory path")
@@ -684,12 +902,18 @@ def parse_args(argv=None):
     p.add_argument("--build-info", default=BUILD_INFO, metavar="FILE", help=f"the image's build stamp (default {BUILD_INFO})")
     p.add_argument("--build-record", metavar="FILE",
                    help="what each OS version was built with: lines of `version kernel bootc ostree podman`")
+    p.add_argument("--show-rpm", action="append", type=rpm_name, metavar="NAME",
+                   help="read the OS image's package list and the rollback image's, count what changed, and show "
+                        f"NAME's version in both, e.g. openssl; repeat for several (at most {RPM_SHOWN_MAX})")
     p.add_argument("--interval", type=seconds, metavar="SECONDS", help="keep running, rewriting the file this often")
     p.add_argument("--os-interval", type=seconds, default=OS_INTERVAL, metavar="SECONDS",
                    help=f"with --interval: ask bootc this often (default {OS_INTERVAL})")
     args = p.parse_args(argv)
     args.service = args.service or []
     args.agent = args.agent or []
+    args.show_rpm = list(dict.fromkeys(args.show_rpm or []))          # in the order given, each once
+    if len(args.show_rpm) > RPM_SHOWN_MAX:
+        p.error(f"--show-rpm: at most {RPM_SHOWN_MAX} packages")
     return args
 
 

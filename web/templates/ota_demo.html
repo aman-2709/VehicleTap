@@ -42,7 +42,21 @@
     <div id="demo-app"></div>
   </section>
 
-  <section class="card demo-card demo-esync">
+  {#- Folded to one line (the counts) until the presenter opens it. A native <details>: the keyboard opens it
+      too, and it stays as the presenter left it through the 5 s refresh, which redraws only what is inside. #}
+  <section class="card demo-card demo-wide" id="demo-pkgs-card" hidden>
+    <details class="demo-fold" id="demo-pkgs-fold">
+      <summary>
+        <span class="card-title">OS Packages</span>
+        <span class="demo-fold-count" id="demo-pkgs-count"></span>
+        <span class="demo-fold-note" id="demo-pkgs-note"></span>
+        <span class="demo-fold-hint" id="demo-pkgs-hint"><span class="when-closed">Show packages ▾</span><span class="when-open">Hide packages ▴</span></span>
+      </summary>
+      <div class="demo-fold-body" id="demo-pkgs"></div>
+    </details>
+  </section>
+
+  <section class="card demo-card demo-wide demo-esync">
     <div class="card-title">eSync</div>
     <div id="demo-esync"></div>
   </section>

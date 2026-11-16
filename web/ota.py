@@ -42,6 +42,8 @@ STALE_MIN_S = 20           # ... and never sooner than this
 SKEW_S = 60                # a timestamp this far ahead of our clock is clock skew, not "now"
 TOOLS = ("bootc", "ostree", "podman")
 CLIENT_LOG_STATES = ("ok", "unavailable")
+PACKAGE_CHANGES = ("same", "updated", "downgraded", "added", "removed")
+PACKAGES_MAX = 100_000     # packages in an OS image
 
 ACTIVE_STATES = ("active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance")
 SELINUX_MODES = ("enforcing", "permissive", "disabled")
@@ -50,6 +52,11 @@ _TIME = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-
                    r"(Z|[+-][0-9]{2}:[0-9]{2})")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _RESULT = re.compile(r"[A-Z][A-Z-]{0,39}")                  # eSync's word for a campaign's state: ROLLBACK-COMPLETED
+_RPM_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,99}")
+# A package's VERSION-RELEASE ('3.5.9-1.el10'), with its epoch ('2:1.0-1') only where the two images' versions
+# differ in nothing else; a package installed in several versions has them joined by ', '.
+_RPM_VERSIONS = re.compile(r"(?:[0-9]{1,10}:)?[0-9A-Za-z][0-9A-Za-z.+~^_-]{0,79}"
+                           r"(?:, (?:[0-9]{1,10}:)?[0-9A-Za-z][0-9A-Za-z.+~^_-]{0,79}){0,3}")
 
 
 def path():
@@ -189,13 +196,38 @@ def _record(r):
     return {k: _text(r.get(k)) for k in ("version", "kernel") + TOOLS}
 
 
+def _rpm_version(v):
+    return v if isinstance(v, str) and _RPM_VERSIONS.fullmatch(v) else ""
+
+
+def _shown_rpm(r):
+    name, change = r.get("name"), r.get("change")
+    return {"name": name if isinstance(name, str) and _RPM_NAME.fullmatch(name) else "",
+            "version": _rpm_version(r.get("version")), "before": _rpm_version(r.get("before")),
+            "change": change if change in PACKAGE_CHANGES else ""}
+
+
+def _packages(raw):
+    """The OS image's packages: how many, how many changed against the rollback image (only when `compared`), and
+    the packages the board was asked to show, each with its version now and in the rollback image."""
+    if not isinstance(raw, dict):
+        return None
+    compared = raw.get("compared") is True
+    count = (lambda key: _int(raw.get(key), PACKAGES_MAX)) if compared else (lambda key: None)
+    return {"total": _int(raw.get("total"), PACKAGES_MAX), "compared": compared,
+            "updated": count("updated"), "downgraded": count("downgraded"), "added": count("added"),
+            "removed": count("removed"),
+            "shown": _entries(raw.get("shown"), "name", _shown_rpm)}
+
+
 def _os(raw):
     raw = raw if isinstance(raw, dict) else {}
     return {"booted": _image(raw.get("booted")), "staged": _image(raw.get("staged")),
             "rollback": _image(raw.get("rollback")), "rollback_queued": raw.get("rollback_queued") is True,
             "kernel": _text(raw.get("kernel")), "booted_at": _when(raw.get("booted_at")),
             "as_of": _when(raw.get("as_of")), "build": _build(raw.get("build")), "tools": _tools(raw.get("tools")),
-            "build_records": _entries(raw.get("build_records"), "version", _record), "distro": _text(raw.get("distro"))}
+            "build_records": _entries(raw.get("build_records"), "version", _record), "distro": _text(raw.get("distro")),
+            "packages": _packages(raw.get("packages"))}
 
 
 def _agent(r):

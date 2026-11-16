@@ -231,6 +231,11 @@ PROCS = [
 ]
 AGENTS = ("/SDK/RHIVOS_APP", "/SDK/RHIVOS_OS")
 MODEL = "Texas Instruments J784S4 EVM\0"                      # /proc/device-tree/model ends in a NUL
+# The real package lists of OS 4.6.0 and 4.3.0 (the J7's `rpm -qa`, 2026-11-11), in RPM_FORMAT. They are the
+# lists of the Act 2 update; the bootc fixture's images carry other labels, which the packages do not depend on.
+RPMS_NOW = fixture_text("rpm_qa_4.6.0.txt")
+RPMS_BEFORE = fixture_text("rpm_qa_4.3.0.txt")
+SHOWN = ("openssl", "zstd", "kernel-automotive")
 
 
 def full_sources(**over):
@@ -238,7 +243,8 @@ def full_sources(**over):
                 tools=TOOL_OUT, records=fixture_text("os_builds.txt"), processes=PROCS,
                 client_log=fixture_bytes("esyncclient_tail.txt"), os_release=fixture_text("os_release.txt"),
                 board_model=MODEL, interval=5, os_interval=15,
-                esync_config={"home": HOME, "unit": "esync", "topics": AGENTS, "os_package": "RHIVOS-OS-AUTOSD"})
+                esync_config={"home": HOME, "unit": "esync", "topics": AGENTS, "os_package": "RHIVOS-OS-AUTOSD"},
+                rpms=ex.rpm_list(RPMS_NOW), rpms_before=ex.rpm_list(RPMS_BEFORE), rpm_shown=SHOWN)
     s.update(over)
     return s
 
@@ -696,6 +702,220 @@ def test_the_esync_options_have_board_defaults_and_take_a_trailing_slash():
     assert ex.parse_args(["--out", "/x/o.json", "--esync-home", "/opt/esync/"]).esync_home == "/opt/esync"
 
 
+# ── the OS image's packages (--show-rpm) ──
+
+ROLLBACK_DB = ("/sysroot/ostree/deploy/default/deploy/" + BOOTC["status"]["rollback"]["ostree"]["checksum"]
+               + ".1160/usr/lib/sysimage/rpm")
+RPM_NOW_CMD = ("rpm", "-qa", "--qf", ex.RPM_FORMAT)
+RPM_BEFORE_CMD = ("rpm", "--dbpath", ROLLBACK_DB, "-qa", "--qf", ex.RPM_FORMAT)
+
+
+def test_a_package_list_is_each_name_with_rpms_epoch_and_version_and_no_signing_keys():
+    now = ex.rpm_list(RPMS_NOW)
+    assert len(now) == 255 and "gpg-pubkey" not in now and "gpg-pubkey" in RPMS_NOW
+    assert now["openssl"] == "1:3.5.9-1.el10" and now["kernel-automotive"] == "0:6.12.0-281.el10iv"
+
+
+@pytest.mark.parametrize("line", ["openssl 1:3.5.9-1.el10", "openssl\t", "\t0:3.5.9", "open ssl\t0:3.5.9", "-x\t0:1",
+                                  "openssl\t0:3.5.9 1", "openssl\t0:<b>", "a/b\t0:1", "openssl\t0:3.5.9\textra",
+                                  "openssl\t3.5.9-1.el10", "openssl\tx:3.5.9", "openssl\t1:", "openssl\t:3.5.9",
+                                  "openssl\t12345678901:3.5.9", "openssl\t1:1:3.5.9"])
+def test_a_line_that_is_not_a_name_a_tab_and_an_epoch_version_is_skipped(line):
+    assert ex.rpm_list(line + "\nzstd\t0:1.5.5-9.el10\n") == {"zstd": "0:1.5.5-9.el10"}
+
+
+def test_a_package_list_that_is_not_text_is_none_and_an_empty_one_is_empty():
+    assert ex.rpm_list(None) is None and ex.rpm_list(b"zstd\t0:1") is None and ex.rpm_list("") == {}
+
+
+def test_a_package_installed_in_two_versions_keeps_both():
+    raw = "kernel-automotive\t0:6.12.0-281.el10iv\nkernel-automotive\t0:6.12.0-251.el10iv\n"
+    assert ex.rpm_list(raw) == {"kernel-automotive": "0:6.12.0-251.el10iv, 0:6.12.0-281.el10iv"}
+
+
+# rpm's own order (rpmvercmp, rpm's tests/rpmvercmp.at): each pair as (a, b, what rpm says of a against b).
+VERCMP = [
+    ("1.0", "1.0", 0), ("1.0", "2.0", -1), ("2.0", "1.0", 1), ("2.0.1", "2.0.1", 0), ("2.0", "2.0.1", -1),
+    ("2.0.1", "2.0", 1), ("2.0.1a", "2.0.1a", 0), ("2.0.1a", "2.0.1", 1), ("2.0.1", "2.0.1a", -1),
+    ("5.5p1", "5.5p1", 0), ("5.5p1", "5.5p2", -1), ("5.5p2", "5.5p1", 1), ("5.5p10", "5.5p10", 0),
+    ("5.5p1", "5.5p10", -1), ("5.5p10", "5.5p1", 1), ("10xyz", "10.1xyz", -1), ("10.1xyz", "10xyz", 1),
+    ("xyz10", "xyz10", 0), ("xyz10", "xyz10.1", -1), ("xyz10.1", "xyz10", 1), ("xyz.4", "xyz.4", 0),
+    ("xyz.4", "8", -1), ("8", "xyz.4", 1), ("xyz.4", "2", -1), ("2", "xyz.4", 1), ("5.5p2", "5.6p1", -1),
+    ("5.6p1", "5.5p2", 1), ("5.6p1", "6.5p1", -1), ("6.5p1", "5.6p1", 1), ("6.0.rc1", "6.0", 1),
+    ("6.0", "6.0.rc1", -1), ("10b2", "10a1", 1), ("10a2", "10b2", -1), ("1.0aa", "1.0aa", 0), ("1.0a", "1.0aa", -1),
+    ("1.0aa", "1.0a", 1), ("10.0001", "10.0001", 0), ("10.0001", "10.1", 0), ("10.1", "10.0001", 0),
+    ("10.0001", "10.0039", -1), ("10.0039", "10.0001", 1), ("4.999.9", "5.0", -1), ("5.0", "4.999.9", 1),
+    ("20101121", "20101121", 0), ("20101121", "20101122", -1), ("20101122", "20101121", 1), ("2_0", "2_0", 0),
+    ("2.0", "2_0", 0), ("2_0", "2.0", 0), ("a", "a", 0), ("a+", "a+", 0), ("a+", "a_", 0), ("a_", "a+", 0),
+    ("+a", "+a", 0), ("+a", "_a", 0), ("_a", "+a", 0), ("+_", "+_", 0), ("_+", "+_", 0), ("_+", "_+", 0),
+    ("+", "_", 0), ("_", "+", 0), ("1.0~rc1", "1.0~rc1", 0), ("1.0~rc1", "1.0", -1), ("1.0", "1.0~rc1", 1),
+    ("1.0~rc1", "1.0~rc2", -1), ("1.0~rc2", "1.0~rc1", 1), ("1.0~rc1~git123", "1.0~rc1~git123", 0),
+    ("1.0~rc1~git123", "1.0~rc1", -1), ("1.0~rc1", "1.0~rc1~git123", 1), ("1.0^", "1.0^", 0), ("1.0^", "1.0", 1),
+    ("1.0", "1.0^", -1), ("1.0^git1", "1.0^git1", 0), ("1.0^git1", "1.0", 1), ("1.0", "1.0^git1", -1),
+    ("1.0^git1", "1.0^git2", -1), ("1.0^git2", "1.0^git1", 1), ("1.0^git1", "1.01", -1), ("1.01", "1.0^git1", 1),
+    ("1.0^20160101", "1.0^20160101", 0), ("1.0^20160101", "1.0.1", -1), ("1.0.1", "1.0^20160101", 1),
+    ("1.0^20160101^git1", "1.0^20160101^git1", 0), ("1.0^20160102", "1.0^20160101^git1", 1),
+    ("1.0^20160101^git1", "1.0^20160102", -1), ("1.0~rc1^git1", "1.0~rc1^git1", 0), ("1.0~rc1^git1", "1.0~rc1", 1),
+    ("1.0~rc1", "1.0~rc1^git1", -1), ("1.0^git1~pre", "1.0^git1~pre", 0), ("1.0^git1", "1.0^git1~pre", 1),
+    ("1.0^git1~pre", "1.0^git1", -1),
+    # the forms in the J7's images
+    ("1.el10.3", "1.4.el10", -1), ("2025.01", "2023.03", 1), ("1.git4dcd294.el10", "1.git988eb15.el10", -1),
+    ("2026.2.92_v9.0.319", "2025.2.80_v9.0.305", 1), ("9.9p1", "9.9p1", 0), ("3.el10iv", "3.el10", 1),
+]
+
+
+@pytest.mark.parametrize("a, b, want", VERCMP)
+def test_versions_are_ordered_as_rpm_orders_them(a, b, want):
+    assert ex.rpmvercmp(a, b) == want
+
+
+@pytest.mark.parametrize("a, b, want", [
+    ("0:1.0-1", "0:1.0-1", 0), ("1:1.0-1", "0:2.0-1", 1),            # the epoch first, whatever the version says
+    ("0:2.0-1", "1:1.0-1", -1), ("0:1.0-2", "0:1.0.1-1", -1),        # then the version, before the release
+    ("0:1.0-2", "0:1.0-10", -1), ("3:1.24.0-3.el10", "2:1.23.0-1.el10", 1),
+    ("1.0-1", "0:1.0-1", 0), ("1.0", "0:1.0-1", -1),                 # no epoch is 0; no release sorts first
+])
+def test_an_epoch_version_release_is_ordered_epoch_then_version_then_release(a, b, want):
+    assert ex.evr_compare(a, b) == want
+
+
+def test_the_act_2_update_changed_119_packages_and_added_one():
+    p = ex.packages_section(ex.rpm_list(RPMS_NOW), ex.rpm_list(RPMS_BEFORE), SHOWN)
+    assert (p["total"], p["compared"], p["updated"], p["downgraded"], p["added"], p["removed"]) == (
+        255, True, 119, 0, 1, 0)
+    assert p["shown"] == [                                    # versions as `rpm -q` writes them, without the epoch
+        {"name": "openssl", "version": "3.5.9-1.el10", "before": "3.5.7-2.el10", "change": "updated"},
+        {"name": "zstd", "version": "1.5.5-9.el10", "before": "", "change": "added"},
+        {"name": "kernel-automotive", "version": "6.12.0-281.el10iv", "before": "6.12.0-251.el10iv", "change": "updated"}]
+
+
+def test_the_reset_from_4_6_0_back_to_4_3_0_downgraded_them():
+    """The demo's reset campaign: 4.3.0 runs and 4.6.0 is the rollback image."""
+    p = ex.packages_section(ex.rpm_list(RPMS_BEFORE), ex.rpm_list(RPMS_NOW), SHOWN)
+    assert (p["total"], p["updated"], p["downgraded"], p["added"], p["removed"]) == (254, 0, 119, 0, 1)
+    assert [(s["name"], s["version"], s["before"], s["change"]) for s in p["shown"]] == [
+        ("openssl", "3.5.7-2.el10", "3.5.9-1.el10", "downgraded"), ("zstd", "", "1.5.5-9.el10", "removed"),
+        ("kernel-automotive", "6.12.0-251.el10iv", "6.12.0-281.el10iv", "downgraded")]
+
+
+def test_each_shown_package_says_what_happened_to_it():
+    now = {"a": "0:1-1", "b": "0:2-1", "d": "0:4-1", "f": "0:1-1"}
+    before = {"a": "0:1-1", "b": "0:1-1", "c": "0:3-1", "f": "0:2-1"}
+    p = ex.packages_section(now, before, ("a", "b", "c", "d", "e", "f"))
+    assert [(s["name"], s["change"]) for s in p["shown"]] == [("a", "same"), ("b", "updated"), ("c", "removed"),
+                                                              ("d", "added"), ("e", ""), ("f", "downgraded")]
+    assert p["shown"][2] == {"name": "c", "version": "", "before": "3-1", "change": "removed"}
+    assert (p["total"], p["updated"], p["downgraded"], p["added"], p["removed"]) == (4, 1, 1, 1, 1)
+
+
+def test_a_change_only_in_the_epoch_keeps_the_epochs_so_the_two_versions_differ_on_screen():
+    p = ex.packages_section({"a": "1:2.0-1", "b": "0:1.0-1"}, {"a": "1:2.0-1", "b": "2:1.0-1"}, ("a", "b"))
+    assert [(s["version"], s["before"], s["change"]) for s in p["shown"]] == [
+        ("2.0-1", "2.0-1", "same"), ("1.0-1", "2:1.0-1", "downgraded")]       # an epoch of 0 is not written
+
+
+def test_a_version_rpm_orders_the_same_but_written_otherwise_counts_as_updated():
+    p = ex.packages_section({"a": "0:1.01-1"}, {"a": "0:1.1-1"}, ("a",))
+    assert (p["updated"], p["downgraded"], p["shown"][0]["change"]) == (1, 0, "updated")
+
+
+def test_a_package_in_two_versions_is_compared_by_its_newest():
+    p = ex.packages_section({"k": "0:6.12.0-251.el10iv, 0:6.12.0-281.el10iv"}, {"k": "0:6.12.0-260.el10iv"}, ("k",))
+    assert p["shown"] == [{"name": "k", "version": "6.12.0-251.el10iv, 6.12.0-281.el10iv",
+                           "before": "6.12.0-260.el10iv", "change": "updated"}]
+    p = ex.packages_section({"k": "0:6.12.0-251.el10iv"}, {"k": "0:6.12.0-240.el10iv, 0:6.12.0-281.el10iv"}, ("k",))
+    assert p["shown"][0]["change"] == "downgraded"
+
+
+def test_without_the_rollback_images_list_nothing_is_compared():
+    p = ex.packages_section(ex.rpm_list(RPMS_NOW), None, ("openssl",))
+    assert (p["total"], p["compared"], p["updated"], p["downgraded"], p["added"], p["removed"]) == (
+        255, False, None, None, None, None)
+    assert p["shown"] == [{"name": "openssl", "version": "3.5.9-1.el10", "before": "", "change": ""}]
+    assert ex.packages_section(None, ex.rpm_list(RPMS_BEFORE), ("openssl",)) is None
+    assert build()["os"]["packages"] is None                               # a run without --show-rpm
+
+
+def test_the_rollback_images_database_is_found_from_what_bootc_names_its_deployment_by():
+    assert ex.rollback_rpmdb(BOOTC) == ROLLBACK_DB
+    assert ex.rollback_rpmdb({"status": {"rollback": None}}) is None and ex.rollback_rpmdb(None) is None
+
+
+@pytest.mark.parametrize("over", [{"stateroot": "../etc"}, {"stateroot": "a/b"}, {"stateroot": ""}, {"stateroot": 1},
+                                  {"checksum": "AB" * 32}, {"checksum": "ab" * 31}, {"checksum": "../" + "a" * 61},
+                                  {"deploySerial": "1"}, {"deploySerial": -1}, {"deploySerial": True},
+                                  {"deploySerial": 10 ** 7}, {"checksum": None}])
+def test_a_deployment_path_needs_each_part_in_the_one_form_it_has(over):
+    tree = dict(BOOTC["status"]["rollback"]["ostree"], **over)
+    assert ex.deployment_rpmdb({"ostree": tree}) is None
+    assert ex.deployment_rpmdb({"ostree": "x"}) is None and ex.deployment_rpmdb({}) is None
+
+
+def rpm_io(answers=None):
+    """A host whose rpm answers from `answers` ({command: output}); every other command as counting_io's."""
+    answers = {RPM_NOW_CMD: RPMS_NOW, RPM_BEFORE_CMD: RPMS_BEFORE} if answers is None else answers
+    calls, io = counting_io()
+    others = io.run
+
+    def run(cmd, timeout=10):
+        if cmd[0] == "rpm":
+            calls.append(tuple(cmd))
+            return answers.get(tuple(cmd))
+        return others(cmd, timeout)
+
+    io.run = run
+    return calls, io
+
+
+def test_a_one_shot_run_reads_both_package_lists_with_rpm():
+    calls, io = rpm_io()
+    d = ex.build(ex.collect(ex.parse_args(["--out", "/x/o.json", "--show-rpm", "openssl"]), io),
+                 now=NOW, mono=MONO, boot=BOOT)
+    assert [c for c in calls if c[0] == "rpm"] == [RPM_NOW_CMD, RPM_BEFORE_CMD]
+    assert d["os"]["packages"]["updated"] == 119 and d["os"]["packages"]["shown"][0]["change"] == "updated"
+    calls, io = rpm_io()
+    ex.collect(ex.parse_args(["--out", "/x/o.json"]), io)
+    assert not [c for c in calls if c[0] == "rpm"]                         # no --show-rpm: rpm is never run
+
+
+def test_the_running_images_list_is_read_once_and_the_rollback_images_when_it_changes():
+    calls, io = rpm_io()
+    c = ex.Collector(args("--show-rpm", "openssl"), io)
+    srcs = passes(c, 7)                                                    # OS passes at 0, 15, 30 s
+    assert calls.count(RPM_NOW_CMD) == 1 and calls.count(RPM_BEFORE_CMD) == 1
+    assert all(s["rpms_before"]["openssl"] == "1:3.5.7-2.el10" for s in srcs)
+    other = json.loads(json.dumps(BOOTC))
+    other["status"]["rollback"]["ostree"]["deploySerial"] = 1161          # an undeploy and a new rollback image
+    c.bootc = other
+    c.collect_packages()
+    assert calls[-1] == ("rpm", "--dbpath", ROLLBACK_DB.replace(".1160/", ".1161/"), "-qa", "--qf", ex.RPM_FORMAT)
+    assert c.rpms_before is None                                           # that database answered nothing
+    c.bootc = {"status": {"booted": BOOTC["status"]["booted"], "rollback": None}}
+    c.collect_packages()
+    assert c.rpms_before is None and c.rpms_before_db is None and calls.count(RPM_NOW_CMD) == 1
+
+
+def test_a_package_list_that_could_not_be_read_is_read_again_at_the_os_interval():
+    calls, io = rpm_io(answers={})                                         # rpm answers nothing
+    src = passes(ex.Collector(args("--show-rpm", "openssl"), io), 7)[-1]   # OS passes at 0, 15, 30 s
+    assert calls.count(RPM_NOW_CMD) == 3 and calls.count(RPM_BEFORE_CMD) == 3
+    assert ex.build(src, now=LOG_NOW, mono=MONO, boot=BOOT)["os"]["packages"] is None
+
+
+@pytest.mark.parametrize("name", ["-qa", "--dbpath", "a b", "a;b", "a/b", "../x", "", "x" * 101, "$(id)"])
+def test_a_shown_package_name_that_is_not_a_package_name_is_refused(name):
+    with pytest.raises(SystemExit):
+        ex.parse_args(["--out", "/x/o.json", "--show-rpm", name])
+
+
+def test_shown_packages_keep_their_order_once_each_and_are_capped():
+    a = ex.parse_args(["--out", "/x/o.json", "--show-rpm", "zstd", "--show-rpm", "openssl", "--show-rpm", "zstd"])
+    assert a.show_rpm == ["zstd", "openssl"] and ex.parse_args(["--out", "/x/o.json"]).show_rpm == []
+    many = [part for i in range(ex.RPM_SHOWN_MAX + 1) for part in ("--show-rpm", f"p{i}")]
+    with pytest.raises(SystemExit):
+        ex.parse_args(["--out", "/x/o.json", *many])
+
+
 # ── what must never get out ──
 
 # bootc's ostree block (checksums, deploy serials, the stateroot) must not get out. "ostree" itself is now a
@@ -744,6 +964,7 @@ def test_the_output_is_what_the_dashboards_reader_accepts_whole():
     assert out["next_boot"]["version"] == "4.5.0" and out["next_boot"]["source"] == "rollback"
     assert d["esync"]["campaigns"] and d["esync"]["agents"] and d["os"]["build_records"]   # not vacuous
     assert d["os"]["distro"] and d["board"]["model"] and d["esync"]["os_package"]
+    assert d["os"]["packages"]["compared"] and len(d["os"]["packages"]["shown"]) == len(SHOWN)
 
 
 def test_the_output_is_strict_json():
@@ -769,12 +990,16 @@ def test_the_commands_it_may_run_are_reads_and_nothing_else():
         return {"bootc": json.dumps(BOOTC), "timedatectl": HOST["ntp"]}.get(cmd[0], HOST["systemctl_show"]["esync"])
 
     io = fake_io(run=fake, read_file=lambda p: json.dumps(ESYNC))
-    ex.collect(ex.parse_args(["--out", "/x/ota.json", "--service", "esync", "--service", "cangen"]), io)
+    ex.collect(ex.parse_args(["--out", "/x/ota.json", "--service", "esync", "--service", "cangen",
+                              "--show-rpm", "openssl"]), io)
     assert ran, "nothing was collected"
     for cmd in ran:
-        assert cmd in READ_ONLY or (cmd[0] == "systemctl" and cmd[1] == "show" and cmd[2] in ("esync", "cangen")), cmd
+        assert (cmd in READ_ONLY or cmd in (RPM_NOW_CMD, RPM_BEFORE_CMD)
+                or (cmd[0] == "systemctl" and cmd[1] == "show" and cmd[2] in ("esync", "cangen"))), cmd
+    assert RPM_BEFORE_CMD in ran                                           # rpm only queries, here a database by path
     forbidden = {"rollback", "upgrade", "switch", "apply", "restart", "start", "stop", "kill", "reboot", "edit",
-                 "enable", "disable", "mask", "set-property", "daemon-reload", "pull", "rm"}
+                 "enable", "disable", "mask", "set-property", "daemon-reload", "pull", "rm", "-e", "-i", "-U",
+                 "--erase", "--install", "--upgrade", "--rebuilddb", "--initdb", "--import"}
     assert not forbidden & {part for cmd in ran for part in cmd}
 
 
@@ -814,9 +1039,10 @@ def test_collecting_survives_every_source_failing():
     io = SimpleNamespace(run=lambda c, timeout=10: None, read_file=boom, statvfs=boom, kernel_release=boom,
                          read_state_dir=boom, processes=boom, log_tail=boom)
     src = ex.collect(ex.parse_args(["--out", "/x/o.json", "--service", "esync", "--agent", "/SDK/A",
-                                    "--build-record", "/x/r.txt"]), io)
+                                    "--build-record", "/x/r.txt", "--show-rpm", "openssl"]), io)
     d = ex.build(src, now=NOW, mono=MONO, boot=BOOT)
     assert d["os"]["booted"] is None and d["components"] == [] and d["services"][0]["active_state"] == "unknown"
+    assert d["os"]["packages"] is None
     assert d["os"]["build"] is None and d["os"]["tools"] == {"bootc": "", "ostree": "", "podman": ""}
     assert d["os"]["build_records"] == [] and d["os"]["as_of"] == ""
     assert d["esync"] == {"unit": "esync", "os_package": "", "processes": None, "outside_unit": None,
@@ -936,5 +1162,5 @@ def test_the_script_is_standalone_it_imports_nothing_from_the_project():
     with open(os.path.join(ROOT, "tools", "ota_export.py")) as f:
         src = f.read()
     imported = {line.split()[1].split(".")[0] for line in src.splitlines() if line.startswith(("import ", "from "))}
-    assert imported <= {"argparse", "json", "os", "re", "subprocess", "sys", "tempfile", "time", "collections",
+    assert imported <= {"argparse", "functools", "json", "os", "re", "subprocess", "sys", "tempfile", "time", "collections",
                         "datetime", "__future__"}, imported
