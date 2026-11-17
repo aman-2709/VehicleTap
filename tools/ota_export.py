@@ -493,8 +493,9 @@ def _campaign_key(m, now):
 
 def campaigns(log, now):
     """The campaigns in the client log: package, target version, campaign number and when the client last
-    logged it, most recent first. The client logs every campaign it is still working on at every session,
-    so an old `last_seen` means it stopped logging it (the campaign ended, or the client is not running).
+    logged it, most recent first (within one second, the higher campaign number first). The client logs every
+    campaign it is still working on at every session, so an old `last_seen` means it stopped logging it (the
+    campaign ended, or the client is not running).
     From the campaign's latest status line: the version eSync rolls back to if it fails (`rollback_version`,
     '' when the package registered none) and eSync's result (`result`, e.g. ROLLBACK-COMPLETED); both '' when
     the tail holds no status line for it."""
@@ -510,7 +511,10 @@ def campaigns(log, now):
         if found and (found[0] not in status or found[1] >= status[found[0]][0]):     # the latest line wins
             rollback = m.group(9).decode()
             status[found[0]] = (found[1], "" if rollback == "<null>" else rollback, m.group(10).decode())
-    ordered = sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))
+    # Most recent first. The client logs every open campaign at each session, in campaign-number order, a few
+    # milliseconds apart, so an old campaign it keeps confirming and a newer one of the same package share a
+    # second: the newer number comes first. The page takes the first campaign of a package as its latest.
+    ordered = sorted(seen.items(), key=lambda kv: (-kv[1], kv[0][0], -kv[0][2], kv[0][1]))
     out = []
     for (p, v, c), t in ordered[:LIST_MAX]:
         _, rollback, result = status.get((p, v, c), (None, "", ""))

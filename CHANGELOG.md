@@ -5,6 +5,14 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
 (see [NOTICE](NOTICE)). This file records what was changed in VehicleTap, with dates. The first change was made on
 2026-10-09; the git history is the full record, and everything before that date is the original project's.
 
+## 2026-11-17: fixes from the review of the OTA demo view
+
+- **The newest campaign of a package is its latest, also within one second.** The exporter listed campaigns by the second
+  the client last logged them, then by version as a string, so an old campaign the client keeps confirming (logged in the
+  same second as a newer one) could come first, and the card showed it as the latest attempt while the campaign in
+  progress never pulsed. Within one second the higher campaign number now comes first (the client logs its campaigns in
+  that order).
+
 ## 2026-11-13: what an OS update changed, on the demo view
 
 - **OS Packages** on `/ota/demo`: how many of the OS image's packages an update changed against the rollback image

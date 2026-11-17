@@ -166,6 +166,10 @@ A field that does not have its form is blanked (`""` or `null`), never passed th
   fails (`""` when the package registered none) and `result` is eSync's word for the campaign's state
   (`UPDATE-COMPLETED`, `ROLLBACK-COMPLETED`, `NOT-COMPLETED`; the reader keeps any upper-case word), both from the
   client's latest status line for it, and `""` when the log's tail holds none.
+* The campaigns are listed most recent first by the time the client last logged them; within the same second the higher
+  campaign number comes first. The client logs every campaign it still works on at each session, in campaign-number
+  order, so an old campaign it keeps confirming shares its second with a newer one of the same package. The demo
+  view takes a package's first campaign as its *Latest OTA attempt*.
 * `os.distro` is the OS's name from os-release; `board.model` is the board's model from its device tree (a product
   name, not a serial number), `""` on a machine without one.
 * `os.packages` is the OS image's packages (`--show-rpm`): `total` in the running image (rpm's signing keys, which it
