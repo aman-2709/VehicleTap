@@ -464,6 +464,50 @@ def test_a_status_line_that_is_not_the_clients_leaves_the_campaign_without_one(l
                                             "last_seen": "2026-11-12T01:30:00Z", "rollback_version": "", "result": ""}]
 
 
+def campaign_line(at, package, version, number):
+    return b"11-12:01:%s.100 pui_init:update_info.cpp:313 [main/1] <%s:%s#%d@8> x\n" % (at, package, version, number)
+
+
+@pytest.mark.parametrize("old, new", [(b"3.7.0", b"3.8.0"), (b"3.9.0", b"3.10.0"), (b"3.10.0", b"3.9.0")])
+@pytest.mark.parametrize("old_first", [True, False])
+def test_of_two_campaigns_of_a_package_logged_in_the_same_second_the_newer_number_comes_first(old, new, old_first):
+    """The client logs every campaign it still works on at each session, so an old campaign it keeps confirming
+    and a new one carry the same second. The page takes the first campaign of a package as its latest."""
+    a = campaign_line(b"30:00", b"RHIVOS-X", old, 1001)
+    b = campaign_line(b"30:00", b"RHIVOS-X", new, 1002)
+    got = ex.campaigns(a + b if old_first else b + a, LOG_NOW)
+    assert [c["campaign"] for c in got] == [1002, 1001]           # by number, not by the version as a string
+
+
+def test_a_later_second_still_comes_before_a_higher_campaign_number():
+    log = campaign_line(b"31:00", b"RHIVOS-X", b"3.7.0", 1001) + campaign_line(b"30:00", b"RHIVOS-X", b"3.8.0", 1002)
+    assert [c["campaign"] for c in ex.campaigns(log, LOG_NOW)] == [1001, 1002]     # the time is the first key
+
+
+def test_campaigns_of_different_packages_in_one_second_keep_a_fixed_order():
+    log = campaign_line(b"30:00", b"RHIVOS-OS", b"4.7.0", 1004) + campaign_line(b"30:00", b"RHIVOS-APP", b"3.7.0", 1001)
+    assert [c["package"] for c in ex.campaigns(log, LOG_NOW)] == ["RHIVOS-APP", "RHIVOS-OS"]
+
+
+def test_a_status_line_cut_inside_or_right_after_its_result_does_not_replace_the_previous_result():
+    """A tail that ends mid-write: the newest status line stops inside eSync's word. A fragment such as NOT-CO
+    must not become the campaign's result; the campaign keeps its previous complete line."""
+    word = b"ROLLBACK-COMPLETED"
+    done = status_line(b"30:00", b"1.0", b"NOT-COMPLETED")
+    full = status_line(b"31:00", b"1.0", word)
+    start = full.index(b"considered already updated: ") + len(b"considered already updated: ")
+    for cut in range(start, start + len(word) + 1):               # none of the word ... the whole word, nothing after
+        got = ex.campaigns(done + full[:cut], LOG_NOW)
+        assert got[0]["result"] == "NOT-COMPLETED", full[:cut][-12:]
+    whole = ex.campaigns(done + full[:start + len(word) + 1], LOG_NOW)      # the word and the space after it
+    assert whole[0]["result"] == "ROLLBACK-COMPLETED"
+
+
+def test_a_status_line_without_the_parenthesis_after_the_result_is_still_read():
+    line = status_line(b"30:00", b"1.0", b"UPDATE-COMPLETED").replace(b" (UPDATE-COMPLETED)", b"")
+    assert ex.campaigns(line, LOG_NOW)[0]["result"] == "UPDATE-COMPLETED"
+
+
 def test_a_campaign_line_without_a_time_at_its_start_is_not_read():
     log = (b"mpaign <RHIVOS-X:1.0#7@8> cut off\n"                       # the first line of a tail is often cut
            b"  <RHIVOS-X:1.0#7@8> continuation\n"

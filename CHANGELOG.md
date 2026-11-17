@@ -5,6 +5,24 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
 (see [NOTICE](NOTICE)). This file records what was changed in VehicleTap, with dates. The first change was made on
 2026-10-09; the git history is the full record, and everything before that date is the original project's.
 
+## 2026-11-17: fixes from the review of the OTA demo view
+
+- **The newest campaign of a package is its latest, also within one second.** The exporter listed campaigns by the second
+  the client last logged them, then by version as a string, so an old campaign the client keeps confirming (logged in the
+  same second as a newer one) could come first, and the card showed it as the latest attempt while the campaign in
+  progress never pulsed. Within one second the higher campaign number now comes first (the client logs its campaigns in
+  that order).
+- **A log tail cut mid-write no longer sets a partial result.** The status line's result word was read up to the end of the
+  tail, so a tail that stopped inside it gave `NOT-CO` for the campaign, replacing the previous complete line's result.
+  The word now counts once a space, a parenthesis or the line's end follows it.
+- **The attempt block claims only what the card shows.** eSync's record can say UPDATE-COMPLETED or ROLLBACK-COMPLETED for a
+  version the board does not run. UPDATE-COMPLETED beside a different *Running now* reads amber (*eSync recorded the update to X,
+  but the device runs R.*); a rollback of the version the board still runs reads *The device still runs X.*; and with no running
+  version known the line says *eSync rolled back to Y*, not that the device did.
+- **A stale answer says nothing is in progress.** The page kept "Update to X is in progress." and the pulse on a dimmed card while
+  the badge said Stale (for example during an OS update's reboot). It now reads *was in progress at the last report* and does not
+  pulse.
+
 ## 2026-11-13: what an OS update changed, on the demo view
 
 - **OS Packages** on `/ota/demo`: how many of the OS image's packages an update changed against the rollback image

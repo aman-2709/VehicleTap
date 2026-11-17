@@ -48,7 +48,7 @@ each other.
     write, which shows an OS update's reboot as it happens.
   * *Pulse:* a campaign in progress (eSync's `NOT-COMPLETED` while the client still logs it) and a staged update
     pulse: a blue dot before the block's title (or the *Update* box's text) and a slow glow on the result line. A
-    finished campaign, which the client keeps confirming until it is stopped on the portal, stays still.
+    finished campaign, which the client keeps confirming until it is stopped on the portal, stays still. A stale answer does not pulse.
   * *Flash:* a fact that changed since the last refresh (the running version, a box of the attempt block, the result
     line) flashes once. Nothing flashes when the page loads.
   There is no progress bar and no percentage: the board reports a campaign as in progress or finished, so that is all
@@ -66,6 +66,12 @@ each other.
     device runs something other than the registered target the line says what it runs, and when no rollback was
     registered it never mentions one), green *Updated to 4.7.1.*, blue *Update to 4.7.1 is in progress.*, or, for a
     campaign the client no longer logs, dim *No recent activity for campaign #N.* with *seen 27 h ago* in the title.
+    eSync's record can name a version the board does not run (after a platform revert), so the line claims only what
+    *Running now* shows: *UPDATE-COMPLETED* for 4.7.0 while the board runs 4.6.0 reads amber *eSync recorded the update to
+    4.7.0, but the device runs 4.6.0.*; a rollback of the version the board still runs reads *…The device still runs
+    4.7.0.*; with no running version known it reads *…eSync rolled back to 4.6.0.*, eSync's record and not a claim about
+    the device. On a stale answer a campaign in progress reads dim *Update to 4.7.1 was in progress at the last report.*
+    and does not pulse.
     A word eSync logs that the page does not know is shown as *eSync reports …*. Only a campaign in progress that
     the client is still logging in the last two minutes is called active: the client keeps confirming a finished
     campaign every 30 s until it is stopped on the portal, and that is not activity. The campaign number and the
@@ -165,7 +171,12 @@ A field that does not have its form is blanked (`""` or `null`), never passed th
 * A campaign's `version` is the version it deploys. `rollback_version` is the version eSync rolls back to if that
   fails (`""` when the package registered none) and `result` is eSync's word for the campaign's state
   (`UPDATE-COMPLETED`, `ROLLBACK-COMPLETED`, `NOT-COMPLETED`; the reader keeps any upper-case word), both from the
-  client's latest status line for it, and `""` when the log's tail holds none.
+  client's latest status line for it, and `""` when the log's tail holds none. A status line counts once eSync's word is complete (a space, a
+  parenthesis or the end of the line follows it); a tail cut mid-write keeps the campaign's previous result.
+* The campaigns are listed most recent first by the time the client last logged them; within the same second the higher
+  campaign number comes first. The client logs every campaign it still works on at each session, in campaign-number
+  order, so an old campaign it keeps confirming shares its second with a newer one of the same package. The demo
+  view takes a package's first campaign as its *Latest OTA attempt*.
 * `os.distro` is the OS's name from os-release; `board.model` is the board's model from its device tree (a product
   name, not a serial number), `""` on a machine without one.
 * `os.packages` is the OS image's packages (`--show-rpm`): `total` in the running image (rpm's signing keys, which it
