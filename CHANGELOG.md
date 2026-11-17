@@ -12,6 +12,9 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
   same second as a newer one) could come first, and the card showed it as the latest attempt while the campaign in
   progress never pulsed. Within one second the higher campaign number now comes first (the client logs its campaigns in
   that order).
+- **A log tail cut mid-write no longer sets a partial result.** The status line's result word was read up to the end of the
+  tail, so a tail that stopped inside it gave `NOT-CO` for the campaign, replacing the previous complete line's result.
+  The word now counts once a space, a parenthesis or the line's end follows it.
 
 ## 2026-11-13: what an OS update changed, on the demo view
 

@@ -165,7 +165,8 @@ A field that does not have its form is blanked (`""` or `null`), never passed th
 * A campaign's `version` is the version it deploys. `rollback_version` is the version eSync rolls back to if that
   fails (`""` when the package registered none) and `result` is eSync's word for the campaign's state
   (`UPDATE-COMPLETED`, `ROLLBACK-COMPLETED`, `NOT-COMPLETED`; the reader keeps any upper-case word), both from the
-  client's latest status line for it, and `""` when the log's tail holds none.
+  client's latest status line for it, and `""` when the log's tail holds none. A status line counts once eSync's word is complete (a space, a
+  parenthesis or the end of the line follows it); a tail cut mid-write keeps the campaign's previous result.
 * The campaigns are listed most recent first by the time the client last logged them; within the same second the higher
   campaign number comes first. The client logs every campaign it still works on at each session, in campaign-number
   order, so an old campaign it keeps confirming shares its second with a newer one of the same package. The demo

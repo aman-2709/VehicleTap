@@ -489,6 +489,25 @@ def test_campaigns_of_different_packages_in_one_second_keep_a_fixed_order():
     assert [c["package"] for c in ex.campaigns(log, LOG_NOW)] == ["RHIVOS-APP", "RHIVOS-OS"]
 
 
+def test_a_status_line_cut_inside_or_right_after_its_result_does_not_replace_the_previous_result():
+    """A tail that ends mid-write: the newest status line stops inside eSync's word. A fragment such as NOT-CO
+    must not become the campaign's result; the campaign keeps its previous complete line."""
+    word = b"ROLLBACK-COMPLETED"
+    done = status_line(b"30:00", b"1.0", b"NOT-COMPLETED")
+    full = status_line(b"31:00", b"1.0", word)
+    start = full.index(b"considered already updated: ") + len(b"considered already updated: ")
+    for cut in range(start, start + len(word) + 1):               # none of the word ... the whole word, nothing after
+        got = ex.campaigns(done + full[:cut], LOG_NOW)
+        assert got[0]["result"] == "NOT-COMPLETED", full[:cut][-12:]
+    whole = ex.campaigns(done + full[:start + len(word) + 1], LOG_NOW)      # the word and the space after it
+    assert whole[0]["result"] == "ROLLBACK-COMPLETED"
+
+
+def test_a_status_line_without_the_parenthesis_after_the_result_is_still_read():
+    line = status_line(b"30:00", b"1.0", b"UPDATE-COMPLETED").replace(b" (UPDATE-COMPLETED)", b"")
+    assert ex.campaigns(line, LOG_NOW)[0]["result"] == "UPDATE-COMPLETED"
+
+
 def test_a_campaign_line_without_a_time_at_its_start_is_not_read():
     log = (b"mpaign <RHIVOS-X:1.0#7@8> cut off\n"                       # the first line of a tail is often cut
            b"  <RHIVOS-X:1.0#7@8> continuation\n"

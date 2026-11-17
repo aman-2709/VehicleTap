@@ -122,7 +122,9 @@ _CAMPAIGN = re.compile(_CAMPAIGN_HEAD, re.M)
 # ('<null>' when the package registered none) and the result after "considered already updated:" are read.
 _CAMPAIGN_STATUS = re.compile(_CAMPAIGN_HEAD + rb" Package is of version [^,\n]{0,64}, needs to be of version [^,\n]{0,64}, "
                               rb"registered rollback to ([0-9A-Za-z.+~_-]{1,64}|<null>) \([^)\n]{0,40}\)"
-                              rb"[^\n]{0,200}?, considered already updated: ([A-Z][A-Z-]{0,39})", re.M)
+                              rb"[^\n]{0,200}?, considered already updated: ([A-Z][A-Z-]{0,39})(?=[ \t(\r\n])", re.M)
+# The word counts only once something follows it (the client writes " (WORD)" and the line break). A tail that ends
+# mid-write would otherwise give a fragment such as NOT-CO, and the latest line wins.
 
 
 def warn(msg):
