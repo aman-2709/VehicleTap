@@ -110,6 +110,13 @@ DTC_DIR = "dtc/"
 # this file: a general "skip tests" rule would be a hole big enough to hide a
 # real leak in.
 SKIP_FILES = ("tests/test_privacy_sweep.py",)
+
+# The OS image package lists the OTA tests compare (`rpm -qa` output, one `name<TAB>epoch:version-release` per
+# line). Four-part versions, such as rpm's own and rpm-sequoia's, read as IPv4 addresses. In exactly these
+# files, a line that is exactly a package line is not an IPv4 finding; any other line there, and the same line in any
+# other file, still is, and every other rule applies as everywhere.
+RPM_LIST_FILES = ("tests/fixtures/ota/rpm_qa_4.3.0.txt", "tests/fixtures/ota/rpm_qa_4.6.0.txt")
+RPM_LINE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,99}\t[0-9]{1,10}:[0-9A-Za-z][0-9A-Za-z.+~^_-]{0,79}")
 BINARY = (".png", ".jpg", ".jpeg", ".gif", ".db", ".dmg", ".pdf", ".ico")
 IMAGE = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".heic")
 
@@ -183,11 +190,20 @@ def _hit(sev, name, rx, line):
     return None
 
 
+def _rpm_list(label):
+    """Whether `label` names one of RPM_LIST_FILES: the file's own path, or how --push labels its added lines."""
+    return any(label == p or label.endswith(" " + p + " (+)") for p in RPM_LIST_FILES)
+
+
 def scan_text(label, text, findings, rules=None, skip=()):
+    rpm_list = _rpm_list(label)
     for n, line in enumerate(text.splitlines(), 1):
         marked, labels = _allowed(line)
+        package_line = rpm_list and RPM_LINE.fullmatch(line) is not None
         for sev, name, rx in rules or RULES:
             if name in skip or name in labels or (marked and sev == "WARN"):
+                continue
+            if package_line and name == "IPv4":
                 continue
             if _hit(sev, name, rx, line):
                 findings.append((sev, name, f"{label}:{n}", line.strip()[:110]))

@@ -375,3 +375,52 @@ def test_the_hook_hands_its_stdin_to_the_push_scan():
     with open(os.path.join(ROOT, ".githooks", "pre-push")) as f:
         hook = f.read()
     assert "privacy_sweep.py --log 50 --push" in hook
+
+
+# ── the OS image package lists (tests/fixtures/ota/rpm_qa_*.txt) ──
+# rpm's own four-part versions (rpm 4.19.1.1, rpm-sequoia 1.10.2.3) read as IPv4 addresses. In exactly those two
+# files, a line that is exactly a package line is not an IPv4 finding; anything else there, and the same line in any
+# other file, still is.
+
+RPM_FIXTURES = ("tests/fixtures/ota/rpm_qa_4.3.0.txt", "tests/fixtures/ota/rpm_qa_4.6.0.txt")
+
+
+@pytest.mark.parametrize("path", RPM_FIXTURES)
+def test_the_package_lists_are_clean_as_they_are(path):
+    found = []
+    with open(os.path.join(ROOT, path)) as f:
+        ps.scan_text(path, f.read(), found)
+    assert found == []
+
+
+@pytest.mark.parametrize("label", [RPM_FIXTURES[0], f"commit abc1234 {RPM_FIXTURES[1]} (+)"])
+def test_a_package_line_in_the_package_lists_is_not_an_address(label):
+    found = []
+    ps.scan_text(label, "rpm\t0:4.19.1.1-28.el10\nrpm-sequoia\t0:1.10.2.3-1.el10", found)
+    assert found == []
+
+
+@pytest.mark.parametrize("label, text", [
+    (RPM_FIXTURES[0], "board\t10.20.30.40"),                      # not epoch:version
+    (RPM_FIXTURES[0], "rpm\t0:4.19.1.1-28.el10 10.20.30.40"),     # more than a package line
+    (RPM_FIXTURES[0], "# board at 10.20.30.40"),
+    ("tests/fixtures/ota/other.txt", "rpm\t0:4.19.1.1-28.el10"),    # the same line, any other file
+    ("tests/fixtures/ota/rpm_qa_4.6.0.txt.bak", "rpm\t0:4.19.1.1-28.el10"),
+    (f"commit abc1234 tests/x/{RPM_FIXTURES[0]} (+)", "rpm\t0:4.19.1.1-28.el10"),
+])
+def test_an_address_anywhere_else_is_still_an_error(label, text):
+    found = []
+    ps.scan_text(label, text, found)
+    assert [(sev, rule) for sev, rule, *_ in found] == [("ERROR", "IPv4")]
+
+
+def test_the_other_rules_still_apply_in_the_package_lists():
+    found = []
+    ps.scan_text(RPM_FIXTURES[0], "contact someone@mailhost.invalid", found)
+    assert [rule for _, rule, *_ in found] == ["e-mail"]
+
+
+def test_only_the_address_rule_is_lifted_on_a_package_line():
+    found = []
+    ps.scan_text(RPM_FIXTURES[0], "0123ABCD-0123-0123-0123-0123456789AB\t0:4.19.1.1-28.el10", found)
+    assert [rule for _, rule, *_ in found] == ["device UUID"]

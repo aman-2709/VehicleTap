@@ -16,7 +16,7 @@
 .ota-link:hover { border-color: var(--accent); }
 
 .ota-banner { margin-bottom: 14px; padding: 14px 18px; font-size: .9em; border-left: 4px solid var(--dim); }
-.ota-banner[hidden], .ota-grid[hidden], .ota-next[hidden] { display: none; }
+.ota-banner[hidden], .ota-grid[hidden], .ota-next[hidden], .ota-asof[hidden] { display: none; }
 .ota-banner.waiting { border-left-color: var(--blue); }
 .ota-banner.stale { border-left-color: var(--yellow); }
 .ota-banner.invalid { border-left-color: var(--red); }
@@ -29,6 +29,8 @@
 
 .ota-next { margin-bottom: 14px; padding: 10px 14px; border-radius: 8px; font-size: .92em; background: var(--card2); border: 1px solid var(--border); }
 .ota-next.warn { border-color: var(--orange); color: #ffd9a0; }
+.ota-asof { margin-bottom: 14px; padding: 10px 14px; border-radius: 8px; font-size: .92em; background: var(--card2);
+  border: 1px solid var(--yellow); color: var(--yellow); }
 
 .ota-scroll { overflow-x: auto; }   /* a phone scrolls the table, not the page */
 .ota-table { width: 100%; border-collapse: collapse; font-size: .85em; }
@@ -38,15 +40,19 @@
 .ota-table tbody th { color: var(--dim); font-weight: 600; white-space: nowrap; }
 .ota-table td { font-variant-numeric: tabular-nums; }
 .ota-table tr.diff td { background: #14301f; color: #c8f0d2; }
+.ota-table tr.old td { color: var(--dim); }
 .ota-images .ota-table td { font-family: ui-monospace, Menlo, monospace; }
 
 .ota-facts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.ota-facts.ota-facts-top { margin-top: 0; }
+.ota-sub { margin: 16px 0 6px; color: var(--dim); font-weight: 600; font-size: .72em; text-transform: uppercase; letter-spacing: .08em; }
 .ota-fact { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: .85em; display: flex; gap: 10px; }
 .ota-fact .k { color: var(--dim); }
 .ota-fact .v.ok { color: var(--green); }
 .ota-fact .v.warn { color: var(--yellow); }
 .ota-fact .v.bad { color: var(--red); }
 .ota-fact .v.dim { color: var(--dim); }
+.ota-fact .ver { color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
 
 .ota-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: var(--dim); }
 .ota-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }

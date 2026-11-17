@@ -22,6 +22,7 @@
     <small>What this board is running, as its host reports it. Read-only.</small></h1>
   <div class="ota-top-right">
     <span class="ota-age" id="ota-age"></span>
+    <a class="ota-link" href="/ota/demo" title="The same status, laid out for an audience">Demo view →</a>
     <a class="ota-link" href="/" title="The telemetry dashboard">Dashboard →</a>
   </div>
 </header>
@@ -35,8 +36,19 @@
   <section class="card ota-os" data-span="12">
     <div class="card-title">Operating system image</div>
     <div class="ota-next" id="ota-next"></div>
+    <div class="ota-asof" id="ota-os-asof" hidden></div>
     <div class="ota-images ota-scroll" id="ota-images"></div>
     <div class="ota-facts" id="ota-os-facts"></div>
+  </section>
+
+  <section class="card" data-span="12">
+    <div class="card-title">eSync</div>
+    <div class="ota-facts ota-facts-top" id="ota-esync"></div>
+    <div class="ota-sub">Campaigns</div>
+    <div class="ota-scroll" id="ota-campaigns"></div>
+    <p class="ota-note">What the eSync client is working on, from its current log. It logs every campaign it is still
+      working on at every session; one it has finished, or that was stopped on the server, leaves the list within a
+      few minutes, as the log rotates. A grey row has not been logged for two minutes.</p>
   </section>
 
   <section class="card" data-span="12">

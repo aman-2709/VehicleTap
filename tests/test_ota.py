@@ -153,12 +153,13 @@ def test_a_fresh_file_is_ok_with_its_age(tmp_path):
 
 
 def test_an_old_file_is_stale_but_still_shown(tmp_path):
-    d = good(generated_at=at(ota.STALE_AFTER_S + 1))
+    """A file that declares no interval (a one-shot run, an older exporter) is stale after STALE_AFTER_S."""
+    d = good(generated_at=at(ota.STALE_AFTER_S + 1), interval_s=None)
     out = ota.read(write(tmp_path, d), now=NOW)
     assert out["status"] == "stale" and out["age_s"] == ota.STALE_AFTER_S + 1
     assert out["os"]["booted"]["version"] == GOOD["os"]["booted"]["version"]    # the last known state, labelled
     assert "ago" in out["message"] or "old" in out["message"]
-    on_the_line = good(generated_at=at(ota.STALE_AFTER_S))
+    on_the_line = good(generated_at=at(ota.STALE_AFTER_S), interval_s=None)
     assert ota.read(write(tmp_path, on_the_line, "b.json"), now=NOW)["status"] == "ok"
 
 
@@ -194,6 +195,13 @@ def poisoned():
     d["services"][0]["exec_start"] = f"/usr/bin/x --key={POISON[1]}"
     d["services"][0]["host"] = POISON[3]
     d["health"]["hostname"] = POISON[5]
+    d["os"]["build"]["uuid"] = POISON[4]
+    d["os"]["tools"]["path"] = POISON[0]
+    d["os"]["build_records"][0]["comment"] = POISON[2]
+    d["esync"]["home"] = POISON[5]
+    d["esync"]["agents"][0]["argv"] = ["/x/workloadagent", "-k", POISON[1]]
+    d["esync"]["campaigns"][0]["line"] = f"Setting {POISON[4]} value for node VIN"
+    d["esync"]["campaigns"][0]["record"] = POISON[3]
     return d
 
 
@@ -203,13 +211,113 @@ def test_keys_that_are_not_in_the_schema_are_dropped_at_every_level(tmp_path):
     blob = json.dumps(out)
     for secret in POISON:
         assert secret not in blob, secret
-    assert set(out) == {"status", "age_s", "message", "schema", "generated_at", "os", "components", "services",
-                        "health", "next_boot"}
+    assert set(out) == {"status", "age_s", "message", "schema", "generated_at", "interval_s", "os_interval_s", "os",
+                        "components", "services", "esync", "health", "board", "next_boot", "build_check"}
     assert set(out["os"]["booted"]) == {"version", "digest", "built_at"}
     assert set(out["components"][0]) == {"id", "version", "transaction_digest", "installed_at"}
     assert set(out["services"][0]) == {"name", "active_state", "sub_state", "since", "restarts"}
     assert set(out["health"]) == {"selinux", "ntp_synced", "var_used_pct", "var_free_bytes"}
-    assert set(out["os"]) == {"booted", "staged", "rollback", "rollback_queued", "kernel", "booted_at"}
+    assert set(out["os"]) == {"booted", "staged", "rollback", "rollback_queued", "kernel", "booted_at", "as_of", "build",
+                              "tools", "build_records", "distro", "packages"}
+    assert set(out["os"]["build"]) == {"version", "built_at"}
+    assert set(out["os"]["tools"]) == {"bootc", "ostree", "podman"}
+    assert set(out["os"]["build_records"][0]) == {"version", "kernel", "bootc", "ostree", "podman"}
+    assert set(out["esync"]) == {"unit", "os_package", "processes", "outside_unit", "agents", "client_log", "campaigns"}
+    assert set(out["board"]) == {"model"}
+    assert set(out["esync"]["agents"][0]) == {"topic", "running"}
+    assert set(out["esync"]["campaigns"][0]) == {"package", "version", "campaign", "last_seen", "rollback_version", "result"}
+
+
+@pytest.mark.parametrize("result,want", [("ROLLBACK-COMPLETED", "ROLLBACK-COMPLETED"), ("UPDATE-COMPLETED", "UPDATE-COMPLETED"),
+                                         ("SOME-NEW-STATE", "SOME-NEW-STATE"), ("rollback", ""), ("A B", ""), ("X" * 41, ""),
+                                         ("<b>x</b>", ""), ("", ""), (None, ""), (7, ""), (["X"], "")])
+def test_a_campaign_result_is_esyncs_upper_case_word_or_nothing(result, want):
+    d = good()
+    d["esync"]["campaigns"][0]["result"] = result
+    d["esync"]["campaigns"][0]["rollback_version"] = "4.4.0\n<x>"
+    out = ota.clean(d)["esync"]["campaigns"][0]
+    assert out["result"] == want
+    assert "\n" not in out["rollback_version"]
+
+
+def test_the_os_name_the_board_model_and_the_os_package_are_kept_as_cleaned_text():
+    d = good()
+    d["os"]["distro"] = "Automotive Stream Distribution 10"
+    d["board"] = {"model": "Texas Instruments J784S4 EVM", "serial": "SYNTH-0001"}
+    d["esync"]["os_package"] = "RHIVOS-OS-AUTOSD"
+    out = ota.clean(d)
+    assert out["os"]["distro"] == "Automotive Stream Distribution 10"
+    assert out["board"] == {"model": "Texas Instruments J784S4 EVM"}            # the model, never a serial number
+    assert out["esync"]["os_package"] == "RHIVOS-OS-AUTOSD"
+    d["os"]["distro"], d["board"]["model"], d["esync"]["os_package"] = "A\x00B\nC" + "x" * 500, 7, ["RHIVOS"]
+    out = ota.clean(d)
+    assert "\x00" not in out["os"]["distro"] and "\n" not in out["os"]["distro"] and len(out["os"]["distro"]) <= ota.TEXT_MAX
+    assert out["board"]["model"] == "" and out["esync"]["os_package"] == ""
+
+
+def packages(**over):
+    p = {"total": 255, "compared": True, "updated": 119, "downgraded": 0, "added": 1, "removed": 0,
+         "shown": [{"name": "openssl", "version": "3.5.9-1.el10", "before": "3.5.7-2.el10", "change": "updated"},
+                   {"name": "zstd", "version": "1.5.5-9.el10", "before": "", "change": "added"}]}
+    p.update(over)
+    return p
+
+
+def test_the_os_packages_are_kept_with_their_counts_and_each_shown_package():
+    d = good()
+    d["os"]["packages"] = packages()
+    d["os"]["packages"]["list"] = ["openssl-3.5.9"]                      # not in the schema
+    d["os"]["packages"]["shown"][0]["arch"] = "aarch64"
+    out = ota.clean(d)["os"]["packages"]
+    assert out == packages()
+    assert ota.clean(good())["os"]["packages"] is None                   # an exporter run without --show-rpm
+
+
+def test_without_a_comparison_the_package_counts_are_dropped():
+    d = good()
+    d["os"]["packages"] = packages(compared=False)
+    out = ota.clean(d)["os"]["packages"]
+    assert (out["compared"], out["updated"], out["downgraded"], out["added"], out["removed"], out["total"]) == (
+        False, None, None, None, None, 255)
+    d["os"]["packages"] = packages(compared="yes")                        # only a real true compares
+    assert ota.clean(d)["os"]["packages"]["compared"] is False
+
+
+@pytest.mark.parametrize("field,value,want", [
+    ("version", "3.5.9-1.el10", "3.5.9-1.el10"), ("version", "6.12.0-251.el10iv, 6.12.0-281.el10iv", None),
+    ("version", "3.5.9 <b>", ""), ("version", "-rf", ""), ("version", "x" * 81, ""), ("version", 359, ""),
+    ("before", "a\nb", ""), ("name", "libstdc++", "libstdc++"), ("name", "../etc", ""), ("name", "-x", ""),
+    ("name", "a b", ""), ("change", "updated", "updated"), ("change", "UPDATED", ""), ("change", "gone", ""),
+    ("change", None, ""), ("change", "downgraded", "downgraded"),
+    ("before", "2:1.0-1", "2:1.0-1"), ("before", "1:1.0-1, 2:1.0-1", None),     # an epoch-only change keeps the epoch
+    ("before", "12345678901:1.0-1", ""), ("before", ":1.0-1", ""), ("before", "1:", "")])
+def test_a_shown_package_keeps_each_field_only_in_the_form_it_has(field, value, want):
+    d = good()
+    d["os"]["packages"] = packages()
+    d["os"]["packages"]["shown"][0][field] = value
+    shown = ota.clean(d)["os"]["packages"]["shown"]
+    if field == "name" and want == "":
+        assert [s["name"] for s in shown] == ["zstd"]                     # a package with no usable name is dropped
+    else:
+        assert shown[0][field] == (value if want is None else want)
+
+
+@pytest.mark.parametrize("bad", [-1, 100_001, 1.5, True, "119", None])
+def test_a_package_count_out_of_range_is_none(bad):
+    d = good()
+    d["os"]["packages"] = packages(updated=bad, total=bad, downgraded=bad)
+    out = ota.clean(d)["os"]["packages"]
+    assert out["updated"] is None and out["total"] is None and out["downgraded"] is None and out["added"] == 1
+
+
+def test_a_file_from_an_exporter_that_did_not_count_downgrades_has_none():
+    """An exporter before 2026-11-14 wrote no `downgraded`: the page then shows the other counts as before."""
+    d = good()
+    p = packages()
+    del p["downgraded"]
+    d["os"]["packages"] = p
+    out = ota.clean(d)["os"]["packages"]
+    assert out["downgraded"] is None and (out["updated"], out["added"], out["removed"]) == (119, 1, 0)
 
 
 def test_a_string_in_an_image_field_is_cleaned_not_trusted():
@@ -318,8 +426,13 @@ def test_lists_are_capped_and_junk_entries_skipped():
     d = good()
     d["components"] = [{"id": f"c{i}", "version": "1"} for i in range(ota.LIST_MAX + 40)] + [None, 5, "x", [], {}]
     d["services"] = [{"name": f"s{i}"} for i in range(ota.LIST_MAX + 40)] + [{"name": ""}, {"active_state": "active"}]
+    d["os"]["build_records"] = [{"version": f"{i}.0"} for i in range(ota.LIST_MAX + 40)] + [{"kernel": "k"}]
+    d["esync"]["agents"] = [{"topic": f"/SDK/A{i}"} for i in range(ota.LIST_MAX + 40)] + [{"running": 1}]
+    d["esync"]["campaigns"] = [{"package": f"P{i}"} for i in range(ota.LIST_MAX + 40)] + [{"campaign": 1}]
     out = ota.clean(d)
     assert len(out["components"]) == ota.LIST_MAX and len(out["services"]) == ota.LIST_MAX
+    for lst in (out["os"]["build_records"], out["esync"]["agents"], out["esync"]["campaigns"]):
+        assert len(lst) == ota.LIST_MAX
     assert all(c["id"] for c in out["components"]) and all(s["name"] for s in out["services"])
     d["components"] = "not a list"
     d["services"] = {"name": "esync"}
@@ -328,15 +441,22 @@ def test_lists_are_capped_and_junk_entries_skipped():
 
 
 def test_sections_that_are_missing_or_the_wrong_type_come_out_empty_not_broken():
-    for section in ("os", "components", "services", "health"):
+    for section in ("os", "components", "services", "esync", "health", "board"):
         for junk in (None, 5, "x", [], [1, 2]):
             d = good()
             d[section] = junk
             out = ota.clean(d)
-            assert set(out) >= {"os", "components", "services", "health"}
+            assert set(out) >= {"os", "components", "services", "esync", "health", "board", "build_check"}
     minimal = ota.clean({"schema": 1, "generated_at": at(1)})
     assert minimal["os"]["booted"] is None and minimal["components"] == [] and minimal["services"] == []
     assert minimal["health"]["selinux"] == "unknown" and minimal["health"]["ntp_synced"] is None
+    assert minimal["os"]["build"] is None and minimal["os"]["tools"] == {"bootc": "", "ostree": "", "podman": ""}
+    assert minimal["os"]["as_of"] == "" and minimal["os"]["build_records"] == []
+    assert minimal["esync"] == {"unit": "", "os_package": "", "processes": None, "outside_unit": None, "agents": [],
+                                "client_log": "unavailable", "campaigns": []}
+    assert minimal["os"]["distro"] == "" and minimal["board"] == {"model": ""}
+    assert minimal["interval_s"] is None and minimal["os_interval_s"] is None
+    assert minimal["build_check"] == {"stamp": "unknown", "record": "off", "differs": []}
 
 
 @pytest.mark.parametrize("junk", [None, 0, 1, -1, 1.5, float("nan"), float("inf"), "", "x", "x" * 10_000, True, [], {}, [None],
@@ -404,6 +524,135 @@ def test_a_queued_rollback_with_no_rollback_image_falls_back_to_booted():
     assert n["source"] == "booted"
 
 
+# ── the eSync section and the declared intervals ──
+
+def test_the_esync_section_is_kept_whole_when_it_is_good():
+    out = ota.clean(good())
+    assert out["esync"] == GOOD["esync"]
+
+
+@pytest.mark.parametrize("field,bad", [("processes", -1), ("processes", 1.5), ("processes", "4"), ("processes", True),
+                                       ("outside_unit", ota.COUNT_MAX + 1), ("outside_unit", None)])
+def test_an_esync_count_is_a_small_non_negative_integer_or_nothing(field, bad):
+    d = good()
+    d["esync"][field] = bad
+    assert ota.clean(d)["esync"][field] is None
+
+
+@pytest.mark.parametrize("bad", ["fine", "", None, 1, "OK"])
+def test_the_client_log_state_is_one_of_two_words(bad):
+    d = good()
+    d["esync"]["client_log"] = bad
+    assert ota.clean(d)["esync"]["client_log"] == "unavailable"
+
+
+@pytest.mark.parametrize("bad", [-1, ota.CAMPAIGN_MAX + 1, "3904", 3.5, None, True])
+def test_a_campaign_number_is_a_whole_number_or_nothing(bad):
+    d = good()
+    d["esync"]["campaigns"][0]["campaign"] = bad
+    c = ota.clean(d)["esync"]["campaigns"][0]
+    assert c["campaign"] is None and c["package"] == GOOD["esync"]["campaigns"][0]["package"]
+
+
+def test_a_campaign_last_seen_that_is_not_a_time_is_blanked():
+    d = good()
+    d["esync"]["campaigns"][0]["last_seen"] = "11-12:01:35:59"
+    assert ota.clean(d)["esync"]["campaigns"][0]["last_seen"] == ""
+
+
+@pytest.mark.parametrize("value,kept", [(5, 5), (1, 1), (86400, 86400), (0, None), (-5, None), (86401, None),
+                                        (5.0, None), ("5", None), (True, None), (None, None)])
+def test_a_declared_interval_is_whole_seconds_from_one_to_a_day(value, kept):
+    out = ota.clean(good(interval_s=value, os_interval_s=value))
+    assert out["interval_s"] == kept and out["os_interval_s"] == kept
+
+
+@pytest.mark.parametrize("interval,fresh_at,stale_at", [(5, 19, 21), (2, 19, 21), (30, 119, 121), (None, 299, 301)])
+def test_a_file_is_stale_after_four_missed_writes_or_five_minutes_if_it_declares_no_interval(tmp_path, interval,
+                                                                                             fresh_at, stale_at):
+    p = write(tmp_path, good(generated_at=at(fresh_at), interval_s=interval))
+    assert ota.read(p, now=NOW)["status"] == "ok"
+    p = write(tmp_path, good(generated_at=at(stale_at), interval_s=interval))
+    out = ota.read(p, now=NOW)
+    assert out["status"] == "stale" and out["os"]["booted"], "stale still shows the data"
+
+
+def test_os_as_of_is_kept_only_when_it_is_a_time():
+    d = good()
+    d["os"]["as_of"] = "a minute ago"
+    assert ota.clean(d)["os"]["as_of"] == ""
+    assert ota.clean(good())["os"]["as_of"] == GOOD["os"]["as_of"]
+
+
+def test_restamp_moves_the_file_to_now_and_keeps_the_age_of_each_observation():
+    d = good()                                           # written 5 s before NOW
+    later = NOW + 86400
+    out = ota.restamp(d, later)
+    assert out["generated_at"] == ota.format_time(later)
+    for before, after in ((d["os"]["as_of"], out["os"]["as_of"]),
+                          (d["esync"]["campaigns"][0]["last_seen"], out["esync"]["campaigns"][0]["last_seen"])):
+        assert ota.parse_time(after) - ota.parse_time(before) == 86400 + 5
+    assert out["os"]["booted"] == d["os"]["booted"] and out["components"] == d["components"]   # history stays
+    assert out["services"] == d["services"] and out["os"]["booted_at"] == d["os"]["booted_at"]
+    assert d["generated_at"] == at(5), "the original is not changed"
+
+
+@pytest.mark.parametrize("raw", [{}, {"generated_at": "junk"}, None, {"generated_at": at(1), "os": 5, "esync": []},
+                                 {"generated_at": at(1), "esync": {"campaigns": [None, 5, {"last_seen": "x"}]}},
+                                 {"generated_at": at(1), "esync": {"campaigns": 5}, "os": {"as_of": 7}}])
+def test_restamp_survives_a_file_with_nothing_to_move(raw):
+    out = ota.restamp(raw, NOW)
+    assert out["generated_at"] == ota.format_time(NOW)
+
+
+# ── the derived build check: is the running image the build its version names? ──
+
+def check(**os_over):
+    d = good()
+    d["os"].update(os_over)
+    return ota.clean(d)["build_check"]
+
+
+def test_the_fixture_is_the_build_its_version_names():
+    assert check() == {"stamp": "match", "record": "match", "differs": []}
+
+
+def test_a_relabelled_image_is_a_stamp_mismatch():
+    """4.4.0 was 4.3.0 re-tagged: its build stamp still says 4.3.0."""
+    assert check(build={"version": "4.3.0", "built_at": "2026-08-01T20:17:50Z"})["stamp"] == "mismatch"
+
+
+def test_no_build_stamp_is_missing_and_no_booted_version_is_unknown():
+    assert check(build=None)["stamp"] == "missing"
+    assert check(build={"version": "", "built_at": "2026-08-01T20:17:50Z"})["stamp"] == "missing"
+    c = check(booted={"version": "", "digest": "sha256:" + "ab" * 32})
+    assert c["stamp"] == "unknown" and c["record"] == "unknown"
+
+
+def test_tools_that_differ_from_the_record_are_named_with_both_versions():
+    c = check(tools={"bootc": "1.17.1", "ostree": GOOD["os"]["tools"]["ostree"], "podman": ""},
+              kernel="6.12.0-281.el10iv.aarch64")
+    want = {r["version"]: r for r in GOOD["os"]["build_records"]}[GOOD["os"]["booted"]["version"]]
+    assert want["bootc"] != "1.17.1" and want["kernel"] != "6.12.0-281.el10iv.aarch64" and want["podman"]
+    assert c["record"] == "mismatch"
+    assert c["differs"] == [{"name": "kernel", "have": "6.12.0-281.el10iv.aarch64", "want": want["kernel"]},
+                            {"name": "bootc", "have": "1.17.1", "want": want["bootc"]},
+                            {"name": "podman", "have": "", "want": want["podman"]}]
+
+
+def test_a_version_with_no_record_is_none_and_no_record_file_is_off():
+    assert check(build_records=[{"version": "1.0.0", "kernel": "k", "bootc": "b", "ostree": "o", "podman": "p"}])["record"] == "none"
+    assert check(build_records=[])["record"] == "off"
+    assert check(build_records="junk")["record"] == "off"
+
+
+def test_the_build_check_is_derived_never_read_from_the_file():
+    d = good()
+    d["build_check"] = {"stamp": "match", "record": "match", "differs": []}
+    d["os"]["build"] = {"version": "0.0.1"}
+    assert ota.clean(d)["build_check"]["stamp"] == "mismatch"
+
+
 # ── the file the repo ships for demos and docs ──
 
 def test_the_demo_file_is_a_valid_current_schema_file():
@@ -415,6 +664,8 @@ def test_the_demo_file_is_a_valid_current_schema_file():
     out = ota.view(raw, now=NOW)
     assert out["status"] == "ok" and out["os"]["booted"]["version"]
     assert out["components"] and out["services"]
+    assert out["esync"]["campaigns"] and out["esync"]["agents"] and out["os"]["build"]
+    assert out["build_check"]["stamp"] in ("match", "mismatch") and out["build_check"]["record"] != "off"
 
 
 def test_the_fixture_is_clean_as_it_stands():
@@ -426,5 +677,9 @@ def test_the_fixture_is_clean_as_it_stands():
     assert cleaned["components"] == GOOD["components"]
     assert cleaned["services"] == GOOD["services"]
     assert cleaned["health"] == GOOD["health"]
+    assert cleaned["esync"] == GOOD["esync"]
+    for k in ("as_of", "build", "tools", "build_records"):
+        assert cleaned["os"][k] == GOOD["os"][k], k
+    assert (cleaned["interval_s"], cleaned["os_interval_s"]) == (GOOD["interval_s"], GOOD["os_interval_s"])
     assert {k: cleaned["os"][k] for k in ("rollback_queued", "kernel", "booted_at")} == \
         {k: GOOD["os"][k] for k in ("rollback_queued", "kernel", "booted_at")}

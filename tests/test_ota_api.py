@@ -23,8 +23,7 @@ needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not i
 
 
 def fresh(**over):
-    d = fixture("ota/status_v1.json")
-    d["generated_at"] = ota.format_time(time.time() - 3)
+    d = ota.restamp(fixture("ota/status_v1.json"), time.time() - 3)
     d.update(over)
     return d
 
@@ -153,7 +152,11 @@ def test_demo_mode_keeps_the_canned_file_looking_current(api, monkeypatch):
     import app as webapp
     client, _ = api
     monkeypatch.setattr(webapp, "DEMO", os.path.join(ROOT, "docs", "demo"))
-    assert client.get("/api/ota").get_json()["age_s"] < 60       # re-stamped, like /api/status
+    out = client.get("/api/ota").get_json()
+    assert out["age_s"] < 60                                    # re-stamped, like /api/status
+    gen = ota.parse_time(out["generated_at"])
+    assert gen - ota.parse_time(out["os"]["as_of"]) <= 2 * out["os_interval_s"]        # its observations too
+    assert all(gen - ota.parse_time(c["last_seen"]) < 120 for c in out["esync"]["campaigns"])
 
 
 def test_demo_mode_without_a_canned_file_has_nothing_to_show(api, monkeypatch, tmp_path):
@@ -202,7 +205,7 @@ def test_the_components_card_says_it_is_esyncs_own_record(api):
 
 def test_every_table_sits_in_a_scroll_box_so_a_phone_scrolls_the_table_not_the_page(api):
     html = api[0].get("/ota").get_data(as_text=True)
-    for ident in ("ota-images", "ota-components", "ota-services"):
+    for ident in ("ota-images", "ota-components", "ota-services", "ota-campaigns"):
         tag = re.search(r'<div[^>]*id="%s"[^>]*>' % ident, html).group(0)
         assert "ota-scroll" in tag, ident
     css = read(STATIC, "ota.css")
@@ -441,7 +444,10 @@ def page(answer):
           mainHidden: g('ota-main').hidden, age: t('ota-age'),
           next: t('ota-next'), nextClass: g('ota-next').className, nextHidden: g('ota-next').hidden, images: t('ota-images'),
           osFacts: t('ota-os-facts'), components: t('ota-components'), services: t('ota-services'),
-          health: t('ota-health')
+          health: t('ota-health'), esync: t('ota-esync'), campaigns: t('ota-campaigns'),
+          campaignRows: (g('ota-campaigns').kids[0] && g('ota-campaigns').kids[0].kids[1]
+            ? g('ota-campaigns').kids[0].kids[1].kids.map(r => r.className) : null),
+          asOf: t('ota-os-asof'), asOfHidden: g('ota-os-asof').hidden
         }));
       });
     """, OTA_JS, json.dumps(answer))
@@ -531,3 +537,236 @@ def test_render_says_not_reported_for_a_component_with_no_version():
 def test_render_labels_the_image_row_image_created_not_built():
     out = page(ota.view(fresh(), now=time.time()))
     assert "Image created" in out["images"] and "Built" not in out["images"]
+
+
+# ── the build check, the update tools and the eSync card ──
+
+def ota_js(expr, *data):
+    """`expr` evaluated in node with window.Ota loaded; `data` arrives as d0, d1, ..."""
+    return node("""
+      globalThis.window = globalThis;
+      require(process.argv[1]);
+      const D = JSON.parse(process.argv[2]);
+      const [d0, d1, d2] = D;
+      console.log(JSON.stringify((() => """ + expr + """)()));
+    """, OTA_JS, json.dumps(list(data)))
+
+
+def good_view(**over):
+    d = ota.view(fresh(**over), now=time.time())
+    assert d["status"] == "ok"
+    return d
+
+
+@needs_node
+def test_the_build_stamp_fact_for_each_state():
+    os_ = {"booted": {"version": "4.4.0"}, "build": {"version": "4.3.0", "built_at": "2026-08-01T20:17:50Z"}}
+    out = ota_js("['match', 'mismatch', 'missing', 'unknown', undefined].map(s => Ota.stampFact(d0, s && {stamp: s}))", os_)
+    assert out[0] == {"text": "4.3.0, built 2026-08-01 20:17:50 UTC", "cls": "ok"}
+    assert out[1] == {"text": "says 4.3.0, but bootc runs 4.4.0", "cls": "bad"}
+    assert out[2] == {"text": "none on the board", "cls": "bad"}
+    assert out[3] == out[4] == {"text": "4.3.0", "cls": "dim"}
+
+
+@needs_node
+def test_the_build_record_fact_for_each_state_and_none_when_there_is_no_record():
+    os_ = {"booted": {"version": "4.6.0"}}
+    differs = [{"name": "kernel", "have": "6.12.0-251", "want": "6.12.0-281"}, {"name": "podman", "have": "", "want": "6.1.0"}]
+    out = ota_js("""['match', 'mismatch', 'none', 'unknown', 'off', undefined]
+                    .map(s => Ota.recordFact(d0, s && {record: s, differs: d1}))""", os_, differs)
+    assert out[0] == {"text": "as built for 4.6.0", "cls": "ok"}
+    assert out[1] == {"text": "not as built for 4.6.0: kernel 6.12.0-251 (built with 6.12.0-281), podman ? (built with 6.1.0)",
+                      "cls": "bad"}
+    assert out[2] == {"text": "no build record for 4.6.0", "cls": "warn"}
+    assert out[3] == {"text": "", "cls": "dim"}
+    assert out[4] is None and out[5] is None
+
+
+@needs_node
+def test_the_update_tools_line_names_each_tool_and_marks_one_that_did_not_answer():
+    out = ota_js("[Ota.toolVersions(d0), Ota.toolVersions(d1), Ota.toolVersions({}), Ota.toolVersions(null)]",
+                 {"bootc": "1.17.1", "ostree": "2026.4", "podman": "6.1.0"}, {"bootc": "1.17.1", "ostree": "", "podman": ""})
+    assert out[0] == [{"name": "bootc", "version": "1.17.1"}, {"name": "ostree", "version": "2026.4"},
+                      {"name": "podman", "version": "6.1.0"}]
+    assert out[1] == [{"name": "bootc", "version": "1.17.1"}, {"name": "ostree", "version": ""},
+                      {"name": "podman", "version": ""}]
+    assert out[2] == [] and out[3] == []
+
+
+def os_fact_spans(answer):
+    """The OS facts as [(label, value text, [highlighted parts])] from the rendered page."""
+    return node(FAKE_DOM + """
+      settle().then(() => {
+        const vers = n => (n.className === 'ver' ? [n.textContent] : []).concat(...(n.kids || []).map(vers));
+        const own = n => n.kids ? n.own + n.kids.map(own).join('') : n.textContent;
+        console.log(JSON.stringify(document.getElementById('ota-os-facts').kids.map(f =>
+          [f.kids[0].textContent, own(f.kids[1]), vers(f.kids[1])])));
+      });
+    """, OTA_JS, json.dumps(answer))
+
+
+@needs_node
+def test_the_kernel_and_tool_version_numbers_stand_out_and_nothing_else_does():
+    facts = {k: (text, vers) for k, text, vers in os_fact_spans(good_view())}
+    assert facts["Kernel"] == ("6.12.0-251.el10iv.aarch64", ["6.12.0-251.el10iv.aarch64"])
+    assert facts["Update tools"] == ("bootc 1.16.6 · ostree 2026.1 · podman 6.0.2", ["1.16.6", "2026.1", "6.0.2"])
+    assert all(not vers for k, (text, vers) in facts.items() if k not in ("Kernel", "Update tools"))
+
+
+@needs_node
+def test_a_tool_or_kernel_that_did_not_answer_is_not_highlighted():
+    d = good_view()
+    d["os"]["kernel"] = ""
+    d["os"]["tools"] = {"bootc": "1.17.1", "ostree": "", "podman": ""}
+    facts = {k: (text, vers) for k, text, vers in os_fact_spans(d)}
+    assert facts["Kernel"] == ("—", [])
+    assert facts["Update tools"] == ("bootc 1.17.1 · ostree ? · podman ?", ["1.17.1"])
+    d["os"]["tools"] = {"bootc": "", "ostree": "", "podman": ""}
+    assert {k: v for k, *v in os_fact_spans(d)}["Update tools"] == ["—", []]
+
+
+def test_the_highlight_is_a_colour_from_the_palette():
+    css = read(os.path.join(STATIC, "ota.css"))
+    rule = css[css.index(".ota-fact .ver {"):]
+    assert "color: var(--accent)" in rule[:rule.index("}")]
+
+
+@needs_node
+def test_the_os_data_note_appears_only_when_bootc_has_stopped_answering():
+    def d(as_of_age, booted=True, every=15):
+        t = 1794447400
+        return {"generated_at": ota.format_time(t), "os_interval_s": every,
+                "os": {"as_of": ota.format_time(t - as_of_age) if as_of_age is not None else "",
+                       "booted": {"version": "4.6.0"} if booted else None}}
+    out = ota_js("D.map(Ota.osDataNote)", d(0), d(30), d(31), d(None, booted=False), d(None), d(100, every=60))
+    assert out[0] == "" and out[1] == ""                                 # within two OS intervals
+    assert out[2] == "The image data is from 31 s before this report: bootc has not answered since."
+    assert out[3] == "No answer from bootc yet." and out[4] == "" and out[5] == ""
+
+
+@needs_node
+def test_the_process_and_agent_facts():
+    out = ota_js("""[Ota.processFact({unit: 'esync', processes: 7, outside_unit: 0}),
+                     Ota.processFact({unit: 'esync', processes: 7, outside_unit: 2}),
+                     Ota.processFact({unit: 'esync', processes: 0, outside_unit: 0}),
+                     Ota.processFact({processes: null}), Ota.processFact(undefined),
+                     [1, 0, 2, null].map(n => Ota.agentFact({topic: '/SDK/X', running: n})),
+                     ['/SDK/RHIVOS_APP', 'RHIVOS_OS', '/', '', null].map(Ota.agentName)]""")
+    assert out[0] == {"text": "7, all in esync.service", "cls": "ok"}
+    assert out[1] == {"text": "2 of 7 outside esync.service (started by hand?)", "cls": "bad"}
+    assert out[2] == {"text": "none running", "cls": "warn"}
+    assert out[3] == out[4] == {"text": "unknown", "cls": "dim"}
+    assert out[5] == [{"text": "running", "cls": "ok"}, {"text": "not running", "cls": "bad"},
+                      {"text": "2 running", "cls": "warn"}, {"text": "unknown", "cls": "dim"}]
+    assert out[6] == ["RHIVOS_APP", "RHIVOS_OS", "", "", ""]
+
+
+@needs_node
+def test_campaign_rows_say_how_long_ago_each_was_seen_and_which_are_current():
+    gen = "2026-11-12T01:36:40Z"
+    rows = [{"package": "A", "version": "1.0", "campaign": 7, "last_seen": "2026-11-12T01:36:25Z",
+             "rollback_version": "0.9", "result": "ROLLBACK-COMPLETED"},
+            {"package": "B", "version": "", "campaign": None, "last_seen": "2026-11-12T01:34:39Z"},
+            {"package": "C", "version": "2.0", "campaign": 9, "last_seen": "2026-11-11T09:00:00Z"},
+            {"package": "D", "version": "2.0", "campaign": 9, "last_seen": ""}]
+    out = ota_js("[Ota.campaignRows(d0, d1), Ota.campaignRows(null, d1), Ota.campaignRows(d0, '')]", rows, gen)
+    none = {"rollback": "", "result": ""}
+    assert out[0] == [{"package": "A", "version": "1.0", "campaign": "#7", "seen": "15 s ago", "current": True,
+                       "rollback": "0.9", "result": "ROLLBACK-COMPLETED"},
+                      {"package": "B", "version": "", "campaign": "", "seen": "2 min ago", "current": False, **none},
+                      {"package": "C", "version": "2.0", "campaign": "#9", "seen": "16 h ago", "current": False, **none},
+                      {"package": "D", "version": "2.0", "campaign": "#9", "seen": "", "current": False, **none}]
+    assert out[1] == [] and all(r["seen"] == "" and not r["current"] for r in out[2])
+
+
+@needs_node
+def test_render_shows_the_build_check_tools_and_the_esync_card():
+    out = page(good_view())
+    assert "Build stamp" in out["osFacts"] and "4.4.0, built 2026-08-07 22:41:09 UTC" in out["osFacts"]
+    for v in ("bootc", "1.16.6", "ostree", "2026.1", "podman", "6.0.2", "as built for 4.4.0"):
+        assert v in out["osFacts"], v
+    assert "7, all in esync.service" in out["esync"]
+    assert "RHIVOS_APP agent" in out["esync"] and "RHIVOS_OS agent" in out["esync"] and "running" in out["esync"]
+    assert "RHIVOS-OS-AUTOSD" in out["campaigns"] and "4.5.0" in out["campaigns"] and "#1003" in out["campaigns"]
+    assert out["asOfHidden"] is True and out["asOf"] == ""
+
+
+@needs_node
+def test_render_marks_a_campaign_not_seen_for_two_minutes_as_old():
+    d = fresh()
+    seen = time.time() - 3
+    d["esync"]["campaigns"] = [{"package": "NOW", "version": "1", "campaign": 1, "last_seen": ota.format_time(seen)},
+                               {"package": "THEN", "version": "1", "campaign": 2, "last_seen": ota.format_time(seen - 3600)}]
+    out = page(ota.view(d, now=time.time()))
+    assert out["campaignRows"] == ["", "old"]
+
+
+@needs_node
+def test_render_says_why_there_are_no_campaigns():
+    d = fresh()
+    d["esync"]["campaigns"] = []
+    assert "No campaign in the client's current log." in page(ota.view(d, now=time.time()))["campaigns"]
+    d["esync"]["client_log"] = "unavailable"
+    assert "No eSync client log was found" in page(ota.view(d, now=time.time()))["campaigns"]
+
+
+@needs_node
+def test_render_shows_a_relabelled_image_and_a_tool_mismatch_as_problems():
+    d = fresh()
+    d["os"]["build"]["version"] = "4.3.0"
+    d["os"]["tools"]["podman"] = "6.1.0"
+    out = page(ota.view(d, now=time.time()))
+    assert "says 4.3.0, but bootc runs 4.4.0" in out["osFacts"]
+    assert "not as built for 4.4.0: podman 6.1.0 (built with 6.0.2)" in out["osFacts"]
+
+
+@needs_node
+def test_render_leaves_out_the_build_record_when_the_exporter_has_none():
+    d = fresh()
+    d["os"]["build_records"] = []
+    out = page(ota.view(d, now=time.time()))
+    assert "Build record" not in out["osFacts"] and "Build stamp" in out["osFacts"]
+
+
+@needs_node
+def test_render_warns_when_the_os_data_is_old():
+    d = fresh()
+    d["os"]["as_of"] = ota.format_time(time.time() - 300)
+    out = page(ota.view(d, now=time.time()))
+    assert out["asOfHidden"] is False and "bootc has not answered since" in out["asOf"]
+    assert "4.4.0" in out["images"], "the last good image data is still shown"
+
+
+@needs_node
+def test_render_writes_hostile_strings_in_the_new_sections_as_text():
+    d = good_view()
+    d["os"]["build"]["version"] = HOSTILE
+    d["os"]["tools"]["bootc"] = HOSTILE
+    d["esync"]["agents"][0]["topic"] = HOSTILE
+    d["esync"]["campaigns"][0]["package"] = HOSTILE
+    d["esync"]["campaigns"][0]["version"] = HOSTILE
+    d["build_check"]["differs"] = [{"name": HOSTILE, "have": HOSTILE, "want": HOSTILE}]
+    d["build_check"]["record"] = "mismatch"
+    out = page(d)                                   # the fake El throws if innerHTML is ever assigned
+    for key in ("osFacts", "esync", "campaigns"):
+        assert HOSTILE in out[key], key
+
+
+@needs_node
+def test_render_copes_with_an_answer_from_an_older_server_that_has_no_new_sections():
+    d = good_view()
+    for key in ("esync", "build_check", "interval_s", "os_interval_s"):
+        d.pop(key)
+    for key in ("as_of", "build", "tools", "build_records"):
+        d["os"].pop(key)
+    out = page(d)
+    assert out["mainHidden"] is False and "4.4.0" in out["images"]
+    assert "unknown" in out["esync"] and "No eSync client log was found" in out["campaigns"]
+    assert "Build record" not in out["osFacts"]
+
+
+def test_the_esync_card_says_where_its_campaigns_come_from(api):
+    html = api[0].get("/ota").get_data(as_text=True)
+    card = html[html.index(">eSync<"):html.index(">Update components<")]
+    assert 'id="ota-esync"' in card and 'id="ota-campaigns"' in card
+    assert "current log" in card and "two minutes" in card
