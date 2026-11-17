@@ -77,21 +77,33 @@
 
   // What eSync's result for a campaign means for the device, in a sentence. eSync's words are the client's, logged
   // after "considered already updated:". `running` is the version the card knows to be running (bootc's for the OS,
-  // eSync's record for an application), '' when it does not know. A rollback is claimed only when one was
-  // registered and the device runs it; otherwise the note says what runs. A word we do not know is shown as is.
-  function verdict(c, running) {
+  // eSync's record for an application), '' when it does not know. What the device does is claimed only when `running`
+  // shows it: eSync's record can say UPDATE-COMPLETED or ROLLBACK-COMPLETED for a version the board does not run (after a
+  // platform revert), and the line then says what eSync recorded and what runs. `stale`: the answer is old, so nothing
+  // is said to be happening now. A word we do not know is shown as is.
+  function verdict(c, running, stale) {
     const to = c.version ? 'Update to ' + c.version : 'The update';
     switch (c.result) {
       case '': return null;                                           // the client has logged no status line yet
-      case 'UPDATE-COMPLETED': return { text: c.version ? 'Updated to ' + c.version + '.' : 'The update completed.', cls: 'ok' };
+      case 'UPDATE-COMPLETED':
+        if (!c.version) return { text: 'The update completed.', cls: 'ok' };
+        if (running && running !== c.version) {
+          return { text: 'eSync recorded the update to ' + c.version + ', but the device runs ' + running + '.', cls: 'warn' };
+        }
+        return { text: 'Updated to ' + c.version + '.', cls: 'ok' };
       case 'ROLLBACK-COMPLETED': {
         const failed = to + ' did not pass its checks.';
-        if (running && running !== c.rollback) return { text: failed + ' The device runs ' + running + '.', cls: 'warn' };
-        return { text: c.rollback ? failed + ' The device rolled back to ' + c.rollback + '.' : failed, cls: 'warn' };
+        let tail = '';
+        if (!running) tail = c.rollback ? ' eSync rolled back to ' + c.rollback + '.' : '';    // eSync's record, not the device's
+        else if (running === c.rollback) tail = ' The device rolled back to ' + c.rollback + '.';
+        else if (running === c.version) tail = ' The device still runs ' + running + '.';
+        else tail = ' The device runs ' + running + '.';
+        return { text: failed + tail, cls: 'warn' };
       }
       case 'NOT-COMPLETED':                                           // only while the client still works on it
-        return c.current ? { text: to + ' is in progress.', cls: 'active' }
-                         : { text: 'No recent activity' + (c.campaign ? ' for campaign ' + c.campaign : '') + '.', cls: 'dim' };
+        if (!c.current) return { text: 'No recent activity' + (c.campaign ? ' for campaign ' + c.campaign : '') + '.', cls: 'dim' };
+        return stale ? { text: to + ' was in progress at the last report.', cls: 'dim' }
+                     : { text: to + ' is in progress.', cls: 'active' };
       default: return { text: 'eSync reports ' + c.result + '.', cls: 'dim' };
     }
   }
@@ -102,14 +114,15 @@
   // logging says when it was last seen. null when the client's log was not read or holds no campaign for the
   // package, so the page says nothing rather than "no campaign". `active` is whether something is happening: the
   // campaign is not completed and the client is still working on it. A finished campaign the client keeps
-  // confirming is not.
-  function attempt(pkg, running, known) {
+  // confirming is not. `stale` (the answer is old): nothing is active or said to be in progress now.
+  function attempt(pkg, running, known, stale) {
     const c = pkg && pkg.campaign;
     if (!known || !c) return null;
     const title = ['Latest OTA attempt' + (c.campaign ? ' · Campaign ' + c.campaign : ''),
                    !c.current && c.seen ? 'seen ' + c.seen : ''].filter(Boolean).join(' · ');
     return { title, attempted: c.version || '', rollback: c.rollback || '', running: running || '',
-             active: c.result === 'NOT-COMPLETED' && !!c.current, note: verdict(c, running || '') };
+             active: c.result === 'NOT-COMPLETED' && !!c.current && !stale,
+             note: verdict(c, running || '', !!stale) };
   }
 
   // The OS's update status from bootc alone: what the next boot starts, when that is a queued rollback or a staged
@@ -296,7 +309,7 @@
       grid(versionBox(kernel, true)),                                       // across the card: a version must not wrap
       gridOf('demo-boxes three', tools.map(f => versionBox(f))),
       grid(...(status ? [mark(box('Update', status.text, status.cls, '', true), 'os/update', status.text)] : [])),
-      ...attemptBlock(attempt(pkg, version, campaignsKnown(data)), 'os'),
+      ...attemptBlock(attempt(pkg, version, campaignsKnown(data), data.status === 'stale'), 'os'),
       grid(...checks(build, record)),
       ...(note ? [el('p', 'demo-asof', note)] : []));
   }
@@ -307,7 +320,7 @@
     const known = campaignsKnown(data);
     apps.forEach(pkg => {
       parts.push(el('div', 'demo-pkg', pkg.name), mark(headline('Installed', pkg.record), pkg.name + '/version', pkg.record),
-                 ...attemptBlock(attempt(pkg, pkg.record, known), pkg.name));
+                 ...attemptBlock(attempt(pkg, pkg.record, known, data.status === 'stale'), pkg.name));
     });
     const services = appServices(data);
     if (services.length) parts.push(el('div', 'demo-sub', 'Services'), grid(...services.map(serviceBox)));

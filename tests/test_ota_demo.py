@@ -243,8 +243,8 @@ def attempt_row(**over):
     return {"campaign": c}
 
 
-def attempt(pkg, running="3.4.0", known=True):
-    return demo_js("X.attempt(d0, %s, %s)" % (json.dumps(running), json.dumps(known)), pkg)
+def attempt(pkg, running="3.4.0", known=True, stale=False):
+    return demo_js("X.attempt(d0, %s, %s, %s)" % (json.dumps(running), json.dumps(known), json.dumps(stale)), pkg)
 
 
 @needs_node
@@ -306,7 +306,44 @@ def test_when_the_device_runs_something_other_than_the_rollback_version_the_note
     assert out["rollback"] == "4.3.0" and out["running"] == "4.6.0"
     assert out["note"] == {"text": "Update to 4.7.1 did not pass its checks. The device runs 4.6.0.", "cls": "warn"}
     nothing_read = attempt(attempt_row(), running="")            # the running version is unknown: only the target
-    assert nothing_read["running"] == "" and nothing_read["note"]["text"].endswith("The device rolled back to 3.4.0.")
+    assert nothing_read["running"] == "" and nothing_read["note"]["text"].endswith("eSync rolled back to 3.4.0.")
+
+
+@needs_node
+def test_a_completed_update_the_device_does_not_run_is_said_in_amber_not_green():
+    """eSync's record is optimistic after a platform revert: it says UPDATE-COMPLETED for 4.7.0 while the board runs 4.6.0."""
+    row = attempt_row(result="UPDATE-COMPLETED", version="4.7.0", rollback="4.6.0")
+    assert attempt(row, running="4.6.0")["note"] == {
+        "text": "eSync recorded the update to 4.7.0, but the device runs 4.6.0.", "cls": "warn"}
+    assert attempt(row, running="4.7.0")["note"] == {"text": "Updated to 4.7.0.", "cls": "ok"}
+    assert attempt(row, running="")["note"] == {"text": "Updated to 4.7.0.", "cls": "ok"}    # nothing to compare with
+    nameless = attempt(attempt_row(result="UPDATE-COMPLETED", version=""), running="4.6.0")
+    assert nameless["note"] == {"text": "The update completed.", "cls": "ok"}
+
+
+@needs_node
+def test_a_rollback_is_claimed_for_the_device_only_when_the_device_runs_it():
+    row = attempt_row(result="ROLLBACK-COMPLETED", version="3.7.0", rollback="3.4.0")
+    check = lambda running: attempt(row, running=running)["note"]
+    assert check("3.4.0") == {"text": "Update to 3.7.0 did not pass its checks. The device rolled back to 3.4.0.", "cls": "warn"}
+    assert check("3.7.0") == {"text": "Update to 3.7.0 did not pass its checks. The device still runs 3.7.0.", "cls": "warn"}
+    assert check("3.5.0") == {"text": "Update to 3.7.0 did not pass its checks. The device runs 3.5.0.", "cls": "warn"}
+    assert check("") == {"text": "Update to 3.7.0 did not pass its checks. eSync rolled back to 3.4.0.", "cls": "warn"}
+    none = attempt(attempt_row(result="ROLLBACK-COMPLETED", version="3.7.0", rollback=""), running="")
+    assert none["note"] == {"text": "Update to 3.7.0 did not pass its checks.", "cls": "warn"}     # none registered: none claimed
+
+
+@needs_node
+def test_stale_data_does_not_say_a_campaign_is_in_progress_or_pulse():
+    working = attempt_row(result="NOT-COMPLETED")
+    out = attempt(working, stale=True)
+    assert out["active"] is False
+    assert out["note"] == {"text": "Update to 3.7.0 was in progress at the last report.", "cls": "dim"}
+    assert attempt(working)["active"] is True and attempt(working)["note"]["cls"] == "active"     # fresh: as before
+    gone = attempt(attempt_row(result="NOT-COMPLETED", current=False, seen="27 h ago"), stale=True)
+    assert gone["note"] == {"text": "No recent activity for campaign #3901.", "cls": "dim"}       # the client had stopped
+    finished = attempt_row(result="ROLLBACK-COMPLETED")
+    assert attempt(finished, stale=True)["note"] == attempt(finished)["note"]                   # a past fact stays
 
 
 @needs_node
@@ -967,3 +1004,15 @@ def test_the_motion_is_css_only_stops_for_reduced_motion_and_loops_in_step_with_
     for name in ("demo-pulse", "demo-breathe"):
         period = float(re.search(r"animation: " + name + r" ([0-9.]+)s", css).group(1))
         assert abs(poll_s / period - round(poll_s / period)) < 1e-9, name
+
+
+
+@needs_node
+def test_a_stale_answer_has_no_pulsing_campaign_and_calls_nothing_in_progress():
+    d = good_view()                                  # OS campaign 1003 is NOT-COMPLETED and was logged when the file was written
+    d["status"], d["age_s"] = "stale", 300
+    out = page(d)
+    assert out["osTitleActive"] == [False]
+    assert out["osNotes"] == [{"text": "Update to 4.5.0 was in progress at the last report.", "cls": "dim"}]
+    assert "in progress." not in out["os"]
+    assert page(good_view())["osTitleActive"] == [True]                                        # the same answer, fresh

@@ -48,7 +48,7 @@ each other.
     write, which shows an OS update's reboot as it happens.
   * *Pulse:* a campaign in progress (eSync's `NOT-COMPLETED` while the client still logs it) and a staged update
     pulse: a blue dot before the block's title (or the *Update* box's text) and a slow glow on the result line. A
-    finished campaign, which the client keeps confirming until it is stopped on the portal, stays still.
+    finished campaign, which the client keeps confirming until it is stopped on the portal, stays still. A stale answer does not pulse.
   * *Flash:* a fact that changed since the last refresh (the running version, a box of the attempt block, the result
     line) flashes once. Nothing flashes when the page loads.
   There is no progress bar and no percentage: the board reports a campaign as in progress or finished, so that is all
@@ -66,6 +66,12 @@ each other.
     device runs something other than the registered target the line says what it runs, and when no rollback was
     registered it never mentions one), green *Updated to 4.7.1.*, blue *Update to 4.7.1 is in progress.*, or, for a
     campaign the client no longer logs, dim *No recent activity for campaign #N.* with *seen 27 h ago* in the title.
+    eSync's record can name a version the board does not run (after a platform revert), so the line claims only what
+    *Running now* shows: *UPDATE-COMPLETED* for 4.7.0 while the board runs 4.6.0 reads amber *eSync recorded the update to
+    4.7.0, but the device runs 4.6.0.*; a rollback of the version the board still runs reads *…The device still runs
+    4.7.0.*; with no running version known it reads *…eSync rolled back to 4.6.0.*, eSync's record and not a claim about
+    the device. On a stale answer a campaign in progress reads dim *Update to 4.7.1 was in progress at the last report.*
+    and does not pulse.
     A word eSync logs that the page does not know is shown as *eSync reports …*. Only a campaign in progress that
     the client is still logging in the last two minutes is called active: the client keeps confirming a finished
     campaign every 30 s until it is stopped on the portal, and that is not activity. The campaign number and the
