@@ -44,8 +44,10 @@ each other.
   with the reason in a banner.
 * **Something is happening:** three kinds of motion, each driven by what the board reports, not by the page's clock.
   * *Heartbeat:* the *Live* badge carries a green dot that beats once for each status the board writes (every 5 s
-    on the J7). The beat stops when the board goes quiet (the badge turns *Stale*, no dot) and resumes with the next
-    write, which shows an OS update's reboot as it happens.
+    on the J7). The beat stops when the board goes quiet and resumes with the next write. While the board reboots (an OS
+    update) its dashboard is down with it: the page shows *No data* ("No answer from the dashboard server.", the cards
+    hidden, no beat) and is *Live* again, beating, a minute or two after the reboot starts (75 s on 2026-11-18). *Stale*
+    means the dashboard still answers but the exporter has stopped writing: the cards stay, dimmed, with the data's age.
   * *Pulse:* a campaign in progress (eSync's `NOT-COMPLETED` while the client still logs it) and a staged update
     pulse: a blue dot before the block's title (or the *Update* box's text) and a slow glow on the result line. A
     finished campaign, which the client keeps confirming until it is stopped on the portal, stays still. A stale answer does not pulse.
@@ -189,7 +191,11 @@ A field that does not have its form is blanked (`""` or `null`), never passed th
   `version` (VERSION-RELEASE as `rpm -q` writes it, `""` if not installed), its version in the rollback image
   (`before`), and `change`: `updated`, `downgraded`, `added`, `removed`, `same`, or `""` without a comparison. The
   epoch only orders versions and is not written, except as `2:1.0-1` when the two versions differ in nothing else. A
-  package installed in several versions has them joined by `, `.
+  package installed in several versions has them joined by `, `. The rollback image's database is read in place with
+  `rpm --dbpath` and nothing is written there: on the J7 (2026-11-18) the deployment's rpm directory (`usr/share/rpm`,
+  behind the `usr/lib/sysimage/rpm` link; `/sysroot` is mounted read-only) had the same names, sizes, modification times
+  and inodes before and after `rpm -qa` read its 257 packages. Its `-wal`, `-shm` and marker files date from when the
+  deployment was created.
 * An image is `null` unless it has a version or a digest. It carries **no registry name and no transport**: those
   name a server.
 * `active_state` is one of `active inactive failed activating deactivating reloading maintenance`, else `unknown`.
