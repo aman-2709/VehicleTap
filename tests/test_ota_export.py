@@ -1131,6 +1131,27 @@ def test_a_failed_write_leaves_the_old_file_and_no_litter(tmp_path, monkeypatch)
     assert os.listdir(tmp_path) == ["ota_status.json"]
 
 
+def test_a_command_that_answers_in_bytes_that_are_not_utf8_does_not_fail_the_pass():
+    """`systemctl` and `timedatectl` are read on every pass, outside any `_attempt`: a reply that is not UTF-8 must not
+    raise (it used to, with text=True), or the whole pass and, in a one-shot run, the program would fail."""
+    out = ex.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'a\\xffb ok')"])
+    assert out == "a\ufffdb ok"                                  # the bad byte is replaced, the rest is read
+
+
+def test_the_file_is_not_forced_to_disk_at_every_write(tmp_path, monkeypatch):
+    """The file is rebuilt from scratch every few seconds, so a write lost in a power cut is replaced by the next one;
+    an fsync at each pass is only eMMC wear. The rename keeps a reader from seeing half a file either way."""
+    def forced(fd):
+        raise AssertionError("os.fsync was called")
+    monkeypatch.setattr(os, "fsync", forced)
+    path = tmp_path / "ota_status.json"
+    path.write_text(json.dumps({"old": True}))
+    doc = build()
+    ex.write_atomic(str(path), doc)
+    assert json.loads(path.read_text()) == doc
+    assert sorted(os.listdir(tmp_path)) == ["ota_status.json"]
+
+
 def test_a_directory_that_does_not_exist_is_an_error_not_created(tmp_path):
     with pytest.raises(OSError):
         ex.write_atomic(str(tmp_path / "nope" / "ota.json"), build())
