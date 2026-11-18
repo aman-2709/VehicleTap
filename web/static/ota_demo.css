@@ -100,12 +100,14 @@
 @keyframes demo-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 .9em 0 var(--accent); } }
 
 .demo-box.changed, .demo-head.changed, .demo-attempt-note.changed { animation: demo-flash 1.6s ease-out; border-radius: 8px; }
+/* A result line that changes while it breathes keeps breathing: the two animations run together. */
+.demo-attempt-note.active.changed { animation: demo-flash 1.6s ease-out, demo-breathe 2.5s ease-in-out infinite; }
 @keyframes demo-flash { from { background: rgba(79, 195, 247, .32); box-shadow: 0 0 0 4px rgba(79, 195, 247, .32); }
                         to { background: transparent; box-shadow: 0 0 0 4px transparent; } }
 
 /* Reduced motion: the same facts, still. The dots stay, the beat, the breathing and the flash stop. */
 @media (prefers-reduced-motion: reduce) {
   .demo-badge.live.beat-a::before, .demo-badge.live.beat-b::before,
-  .demo-attempt-title.active::before, .demo-box .v.active::before, .demo-attempt-note.active { animation: none; }
-  .demo-box.changed, .demo-head.changed, .demo-attempt-note.changed { animation: none; background: rgba(79, 195, 247, .18); }
+  .demo-attempt-title.active::before, .demo-box .v.active::before, .demo-attempt-note.active, .demo-attempt-note.active.changed { animation: none; }
+  .demo-box.changed, .demo-head.changed, .demo-attempt-note.changed, .demo-attempt-note.active.changed { animation: none; background: rgba(79, 195, 247, .18); }
 }

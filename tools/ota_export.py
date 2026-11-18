@@ -601,9 +601,9 @@ def build(src, now, mono, boot):
 # ── the only things that touch the host ──────────────────────────────────
 
 def run(cmd, timeout=10):
-    """stdout of a read-only command, or None if it cannot be run or fails."""
+    """stdout of a read-only command, or None if it cannot be run or fails. A byte that is not UTF-8 is replaced, not raised."""
     try:
-        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout, check=False)
+        r = subprocess.run(list(cmd), capture_output=True, text=True, errors="replace", timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         warn(f"{cmd[0]}: {e}")
         return None
@@ -823,15 +823,15 @@ class Collector:
 def write_atomic(path, doc):
     """Write `doc` to `path` so a reader sees the old file or the new one, never half. The temporary file is
     beside the target (same filesystem, so the rename is atomic) and the result is world-readable: the
-    dashboard container runs as another user."""
+    dashboard container runs as another user. It is not fsynced: the file is rebuilt from scratch every few seconds, so a
+    write lost in a power cut is replaced by the next, and a short or empty file is what the reader already reports as
+    `invalid` for one interval; an fsync at each pass is only wear on the board's eMMC."""
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".ota_status.", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(doc, f, indent=2, sort_keys=True, allow_nan=False)
             f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:

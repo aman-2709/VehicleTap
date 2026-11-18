@@ -251,7 +251,7 @@ def attempt(pkg, running="3.4.0", known=True, stale=False):
 def test_the_latest_attempt_takes_its_campaign_and_versions_from_the_clients_log_and_the_running_version_from_the_card():
     out = attempt(attempt_row())
     assert out == {"title": "Latest OTA attempt · Campaign #3901", "attempted": "3.7.0", "rollback": "3.4.0",
-                   "running": "3.4.0", "active": False,
+                   "running": "3.4.0", "active": False, "statusRead": True,
                    "note": {"text": "Update to 3.7.0 did not pass its checks. The device rolled back to 3.4.0.", "cls": "warn"}}
     other = attempt(attempt_row(campaign="#77", version="9.9", rollback="8.8"), running="8.8")
     assert (other["title"], other["attempted"], other["rollback"], other["running"]) == (
@@ -356,6 +356,13 @@ def test_a_campaign_with_no_version_or_number_is_still_worded_without_blanks():
 
 
 @needs_node
+def test_a_blank_rollback_means_none_registered_only_when_a_status_line_was_read():
+    """The exporter writes rollback_version '' both for 'eSync registered none' and for 'no status line read yet'."""
+    assert attempt(attempt_row(rollback="", result="UPDATE-COMPLETED"))["statusRead"] is True
+    assert attempt(attempt_row(rollback="", result=""))["statusRead"] is False
+
+
+@needs_node
 def test_there_is_no_block_without_the_clients_log_or_without_a_campaign():
     assert attempt(attempt_row(), known=False) is None           # the log was not read: say nothing
     assert attempt({"campaign": None}) is None
@@ -429,6 +436,10 @@ def test_a_campaign_with_no_status_line_yet_shows_its_boxes_and_no_note():
     out = page(d)
     assert out["appTitles"] == ["Latest OTA attempt · Campaign #3901"] and out["appNotes"] == []
     assert by_label(out["appRows"])["Attempted"]["v"] == "3.7.0"
+    rb = by_label(out["appRows"])["Rolls back to"]
+    assert (rb["v"], rb["cls"]) == ("\u2014", "dim")                 # nothing is known: a dash, not "none registered"
+    d["esync"]["campaigns"][0]["result"] = "UPDATE-COMPLETED"        # now a status line says eSync registered none
+    assert by_label(page(d)["appRows"])["Rolls back to"]["v"] == "none registered"
 
 
 @needs_node
@@ -1016,3 +1027,26 @@ def test_a_stale_answer_has_no_pulsing_campaign_and_calls_nothing_in_progress():
     assert out["osNotes"] == [{"text": "Update to 4.5.0 was in progress at the last report.", "cls": "dim"}]
     assert "in progress." not in out["os"]
     assert page(good_view())["osTitleActive"] == [True]                                        # the same answer, fresh
+
+
+
+@needs_node
+def test_the_heartbeat_does_not_beat_again_when_the_page_returns_to_the_same_status():
+    a = good_view()
+    gap = {"status": "waiting", "message": "no file yet"}                  # no answer: the badge reads No data
+    steps = page_seq(a, gap, copy.deepcopy(a))
+    assert steps[0]["badgeClass"].startswith("demo-badge live beat-")
+    assert steps[1]["badgeClass"] == "demo-badge none"
+    assert steps[2]["badgeClass"] == "demo-badge live"                     # the same write again: no new beat, no stray space
+    again = page_seq(a, gap, later(a))
+    assert again[2]["badgeClass"].startswith("demo-badge live beat-")      # a new write beats
+
+
+# N7: the result line that changes while it breathes
+def test_a_result_line_that_changes_while_active_keeps_breathing_and_stops_for_reduced_motion():
+    css = read(STATIC, "ota_demo.css")
+    rule = ".demo-attempt-note.active.changed {"
+    assert rule in css
+    body = css[css.index(rule):].split("}")[0]
+    assert "demo-flash" in body and "demo-breathe" in body                # both at once: the flash does not replace the glow
+    assert ".demo-attempt-note.active.changed" in css[css.index("@media (prefers-reduced-motion: reduce)"):]

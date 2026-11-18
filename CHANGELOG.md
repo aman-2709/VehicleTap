@@ -5,6 +5,19 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
 (see [NOTICE](NOTICE)). This file records what was changed in VehicleTap, with dates. The first change was made on
 2026-10-09; the git history is the full record, and everything before that date is the original project's.
 
+## 2026-11-18: the reboot reads No data, and the review's small findings
+
+- **During an OS update's reboot the page shows *No data*, not *Stale*.** Seen on the J7's own update (4.3.0 to 4.6.0): the dashboard container goes
+  down with the board, so the page gets no answer ("No answer from the dashboard server.", the cards hidden, no heartbeat) and is Live again about 75 s
+  after the reboot starts. *Stale* is the case where the dashboard answers and the exporter has stopped. `docs/OTA.md` said Stale; corrected.
+- **"Rolls back to" says *none registered* only when a status line says so.** A blank rollback version also means "no status line read yet"; the box
+  shows a dash then.
+- **No heartbeat when the page returns to the same status** after a gap with no answer; only a new write beats.
+- **A result line that is breathing keeps breathing** in the render in which it changes (the flash and the glow run together).
+- **Exporter:** a reply from `systemctl`/`timedatectl` that is not UTF-8 no longer fails the pass (the byte is replaced); the status file is no longer
+  fsynced at every pass (it is rebuilt every few seconds; the rename still keeps a reader from seeing half a file).
+- **Checked on the J7:** `rpm --dbpath` on the rollback image leaves that image's rpm directory unchanged (`docs/OTA.md`).
+
 ## 2026-11-17: fixes from the review of the OTA demo view
 
 - **The newest campaign of a package is its latest, also within one second.** The exporter listed campaigns by the second
@@ -20,8 +33,8 @@ VehicleTap is based on **Ha-Kake**, created by David D. Karnowski
   but the device runs R.*); a rollback of the version the board still runs reads *The device still runs X.*; and with no running
   version known the line says *eSync rolled back to Y*, not that the device did.
 - **A stale answer says nothing is in progress.** The page kept "Update to X is in progress." and the pulse on a dimmed card while
-  the badge said Stale (for example during an OS update's reboot). It now reads *was in progress at the last report* and does not
-  pulse.
+  the badge said Stale (which happens when the dashboard answers but the exporter has stopped; during an OS update's reboot the
+  dashboard is down too and the page says *No data*). It now reads *was in progress at the last report* and does not pulse.
 
 ## 2026-11-13: what an OS update changed, on the demo view
 

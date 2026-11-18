@@ -114,14 +114,15 @@
   // logging says when it was last seen. null when the client's log was not read or holds no campaign for the
   // package, so the page says nothing rather than "no campaign". `active` is whether something is happening: the
   // campaign is not completed and the client is still working on it. A finished campaign the client keeps
-  // confirming is not. `stale` (the answer is old): nothing is active or said to be in progress now.
+  // confirming is not. `stale` (the answer is old): nothing is active or said to be in progress now. `statusRead`: the client's
+  // status line was read, so a blank rollback version means eSync registered none; without it, it means nothing is known yet.
   function attempt(pkg, running, known, stale) {
     const c = pkg && pkg.campaign;
     if (!known || !c) return null;
     const title = ['Latest OTA attempt' + (c.campaign ? ' · Campaign ' + c.campaign : ''),
                    !c.current && c.seen ? 'seen ' + c.seen : ''].filter(Boolean).join(' · ');
     return { title, attempted: c.version || '', rollback: c.rollback || '', running: running || '',
-             active: c.result === 'NOT-COMPLETED' && !!c.current && !stale,
+             active: c.result === 'NOT-COMPLETED' && !!c.current && !stale, statusRead: !!c.result,
              note: verdict(c, running || '', !!stale) };
   }
 
@@ -343,7 +344,7 @@
   function attemptBlock(a, scope) {
     if (!a) return [];
     const ver = v => (v ? O.versionText(v) : '');
-    const rollback = a.rollback ? ver(a.rollback) : 'none registered';
+    const rollback = a.rollback ? ver(a.rollback) : (a.statusRead ? 'none registered' : '');       // '' shows a dash
     const parts = [el('div', 'demo-sub demo-attempt-title' + (a.active ? ' active' : ''), a.title),
                    gridOf('demo-boxes three', [
                      mark(box('Attempted', ver(a.attempted)), scope + '/attempted', a.attempted),
@@ -381,9 +382,11 @@
       beatFlip = !beatFlip;
       beatClass = beatFlip ? 'beat-a' : 'beat-b';
       lastWrite = data.generated_at;
+    } else if (badge.cls !== 'live') {
+      beatClass = '';                                      // not live: coming back to the same status must not beat again
     }
     $('demo-badge').textContent = badge.text;
-    $('demo-badge').className = 'demo-badge ' + badge.cls + (badge.cls === 'live' ? ' ' + beatClass : '');
+    $('demo-badge').className = ['demo-badge', badge.cls, badge.cls === 'live' && beatClass].filter(Boolean).join(' ');
     const show = !!data && (data.status === 'ok' || data.status === 'stale');
     const b = show ? null : O.banner(data);
     $('demo-banner').hidden = !b;
